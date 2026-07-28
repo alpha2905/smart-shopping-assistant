@@ -3,7 +3,11 @@ Script dùng cho GitHub Actions - scrape tất cả query đã lưu.
 Chạy: python scripts/hourly_scrape.py
 """
 import asyncio
+import os
 import sys
+
+# Thêm thư mục gốc của project vào sys.path để import được utils, scrapers,...
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
