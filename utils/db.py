@@ -1,9 +1,9 @@
 """
-MongoDB module for storing products and price history.
+MongoDB module for storing products with embedded price history.
 
-Two collections:
-  - products: one doc per (product_url, source), upserted each scrape
-  - price_history: one doc per scrape event per product (append-only)
+Single collection "products":
+  - Mỗi document là một sản phẩm
+  - price_history là mảng embedded, append-only
 """
 
 import os
@@ -12,16 +12,12 @@ from datetime import datetime
 from typing import List, Dict, Any
 
 from dotenv import load_dotenv
-import pymongo
 from pymongo import MongoClient, ASCENDING, DESCENDING
 
-# Load .env file at module level
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# MongoDB Atlas URI (set in .env or environment variable)
-# Default: the user's Atlas cluster
 MONGO_URI = os.environ.get(
     "MONGO_URI",
     "mongodb+srv://22050040_db_user:Accnam55@giasanpham.uqyaw1p.mongodb.net/?appName=GiaSanPham",
@@ -43,39 +39,26 @@ def get_db():
     return get_client()[MONGO_DB]
 
 
-def get_products_collection():
+def get_collection():
     return get_db()["products"]
-
-
-def get_price_history_collection():
-    return get_db()["price_history"]
 
 
 def init_db() -> None:
     """Create indexes if they don't exist."""
-    db = get_db()
-
-    # products collection: unique compound index on (product_url, source)
-    products_col = db["products"]
-    products_col.create_index([("product_url", ASCENDING), ("source", ASCENDING)], unique=True)
-    products_col.create_index([("query", ASCENDING)])
-    products_col.create_index([("last_scraped_at", DESCENDING)])
-
-    # price_history collection: index for fast lookups
-    history_col = db["price_history"]
-    history_col.create_index([("product_url", ASCENDING), ("source", ASCENDING), ("scraped_at", ASCENDING)])
-    history_col.create_index([("scraped_at", ASCENDING)])
-
+    col = get_collection()
+    col.create_index([("product_url", ASCENDING), ("source", ASCENDING)], unique=True)
+    col.create_index([("query", ASCENDING)])
+    col.create_index([("last_scraped_at", DESCENDING)])
+    # Index trên mảng price_history.scraped_at để query nhanh
+    col.create_index([("price_history.scraped_at", DESCENDING)])
     logger.info("MongoDB indexes initialized in database '%s'", MONGO_DB)
 
 
 def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
     """
-    Upsert products and append price history.
-    Called after every scrape batch.
+    Upsert product, push price into price_history array (append-only).
     """
-    products_col = get_products_collection()
-    history_col = get_price_history_collection()
+    col = get_collection()
     now = datetime.utcnow()
 
     for prod in products:
@@ -88,28 +71,27 @@ def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
         if not product_url or not source:
             continue
 
-        # Upsert product
-        products_col.update_one(
+        col.update_one(
             {"product_url": product_url, "source": source},
-            {"$set": {
-                "name": name,
-                "image_url": image_url,
-                "query": query,
-                "last_scraped_at": now,
-            }},
+            {
+                "$set": {
+                    "name": name,
+                    "image_url": image_url,
+                    "query": query,
+                    "last_scraped_at": now,
+                },
+                "$push": {
+                    "price_history": {
+                        "price": price,
+                        "scraped_at": now,
+                    }
+                },
+            },
             upsert=True,
         )
 
-        # Append price history (never delete old prices)
-        history_col.insert_one({
-            "product_url": product_url,
-            "source": source,
-            "price": price,
-            "scraped_at": now,
-        })
-
     logger.info(
-        "Saved %d products for query '%s' (%d new price rows)",
+        "Saved %d products for query '%s' (%d new price entries)",
         len(products),
         query,
         len(products),
@@ -120,73 +102,62 @@ def get_product_price_history(
     product_url: str, source: str
 ) -> List[Dict[str, Any]]:
     """Return all historical prices for a product, oldest first."""
-    history_col = get_price_history_collection()
-    cursor = history_col.find(
+    col = get_collection()
+    doc = col.find_one(
         {"product_url": product_url, "source": source},
-        {"price": 1, "scraped_at": 1, "_id": 0},
-    ).sort("scraped_at", ASCENDING)
-    return list(cursor)
+        {"price_history": 1, "_id": 0},
+    )
+    if not doc or "price_history" not in doc:
+        return []
+    return sorted(doc["price_history"], key=lambda x: x["scraped_at"])
 
 
 def get_all_products() -> List[Dict[str, Any]]:
     """Return latest snapshot of all tracked products with their current price."""
-    products_col = get_products_collection()
-    history_col = get_price_history_collection()
-
+    col = get_collection()
     results = []
-    for prod in products_col.find({}):
-        # Find the most recent price history entry for this product
-        latest_price = history_col.find_one(
-            {"product_url": prod["product_url"], "source": prod["source"]},
-            sort=[("scraped_at", DESCENDING)],
-        )
-        doc = {
-            "product_url": prod.get("product_url", ""),
-            "source": prod.get("source", ""),
-            "name": prod.get("name", ""),
-            "image_url": prod.get("image_url", ""),
-            "query": prod.get("query", ""),
-            "last_scraped_at": prod.get("last_scraped_at"),
-            "price": latest_price["price"] if latest_price else "",
-            "scraped_at": latest_price["scraped_at"] if latest_price else None,
-        }
-        results.append(doc)
-
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "source": doc.get("source", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "query": doc.get("query", ""),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "price": latest_price.get("price", ""),
+            "scraped_at": latest_price.get("scraped_at"),
+        })
     results.sort(key=lambda x: (x.get("query", ""), x.get("source", ""), x.get("name", "")))
     return results
 
 
 def get_latest_prices_for_query(query: str) -> List[Dict[str, Any]]:
     """Return products whose last-scraped query matches (latest price only)."""
-    products_col = get_products_collection()
-    history_col = get_price_history_collection()
-
+    col = get_collection()
     results = []
-    for prod in products_col.find({"query": query}):
-        latest_price = history_col.find_one(
-            {"product_url": prod["product_url"], "source": prod["source"]},
-            sort=[("scraped_at", DESCENDING)],
-        )
-        doc = {
-            "product_url": prod.get("product_url", ""),
-            "source": prod.get("source", ""),
-            "name": prod.get("name", ""),
-            "image_url": prod.get("image_url", ""),
-            "query": prod.get("query", ""),
-            "last_scraped_at": prod.get("last_scraped_at"),
-            "price": latest_price["price"] if latest_price else "",
-            "scraped_at": latest_price["scraped_at"] if latest_price else None,
-        }
-        results.append(doc)
-
+    for doc in col.find({"query": query}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "source": doc.get("source", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "query": doc.get("query", ""),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "price": latest_price.get("price", ""),
+            "scraped_at": latest_price.get("scraped_at"),
+        })
     results.sort(key=lambda x: (x.get("source", ""), x.get("name", "")))
     return results
 
 
 def get_unique_queries() -> List[str]:
     """Return all distinct query strings ever searched."""
-    products_col = get_products_collection()
-    return products_col.distinct("query")
+    col = get_collection()
+    return col.distinct("query")
 
 
 def close_db() -> None:

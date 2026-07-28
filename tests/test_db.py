@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from utils.db import init_db, save_search_results, get_product_price_history, close_db
+from utils.db import init_db, save_search_results, get_product_price_history, get_collection, close_db
 
 MONGO_TEST_DB = "price_tracker_test"
 
@@ -9,23 +9,18 @@ MONGO_TEST_DB = "price_tracker_test"
 class DbStorageTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        """Set MongoDB test DB cho toàn bộ test class."""
         os.environ["MONGO_DB"] = MONGO_TEST_DB
         init_db()
 
     @classmethod
     def tearDownClass(cls):
-        """Dọn dẹp: xoá test database và đóng kết nối."""
         from utils.db import get_client
         client = get_client()
         client.drop_database(MONGO_TEST_DB)
         close_db()
 
     def setUp(self):
-        """Xoá dữ liệu cũ trong collection products và price_history trước mỗi test."""
-        from utils.db import get_products_collection, get_price_history_collection
-        get_products_collection().delete_many({})
-        get_price_history_collection().delete_many({})
+        get_collection().delete_many({})
 
     def test_save_search_results_keeps_price_history(self):
         first = [{
@@ -52,6 +47,26 @@ class DbStorageTests(unittest.TestCase):
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]['price'], '20000000')
         self.assertEqual(history[1]['price'], '21000000')
+
+    def test_single_document_per_product(self):
+        """Chỉ 1 document cho 1 sản phẩm, dù scrape nhiều lần."""
+        prod = {
+            'name': 'Samsung Galaxy',
+            'price': '15000000',
+            'image_url': 'https://example.com/s23.jpg',
+            'product_url': 'https://example.com/s23',
+            'source': 'test-shop',
+        }
+        save_search_results('samsung', [prod])
+        save_search_results('samsung', [prod])
+        save_search_results('samsung', [prod])
+
+        col = get_collection()
+        count = col.count_documents({"product_url": "https://example.com/s23", "source": "test-shop"})
+        self.assertEqual(count, 1)
+
+        history = get_product_price_history('https://example.com/s23', 'test-shop')
+        self.assertEqual(len(history), 3)
 
 
 if __name__ == '__main__':
