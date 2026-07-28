@@ -1,0 +1,58 @@
+name: Hourly Price Scrape
+
+on:
+  schedule:
+    # Chạy mỗi giờ vào phút thứ 0
+    - cron: '0 * * * *'
+  workflow_dispatch:  # Cho phép chạy thủ công từ GitHub UI
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install apscheduler
+
+      - name: Install Playwright browsers
+        run: |
+          python -m playwright install chromium
+          python -m playwright install-deps chromium
+
+      - name: Run hourly scrape
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          MONGO_DB: ${{ secrets.MONGO_DB }}
+        run: |
+          python -c "
+import asyncio
+import sys
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+from utils.db import init_db, get_unique_queries, save_search_results
+from main import scrape_and_save
+
+init_db()
+queries = get_unique_queries()
+print(f'Found {len(queries)} queries to scrape: {queries}')
+for q in queries:
+    print(f'Scraping: {q}')
+    try:
+        results = scrape_and_save(q)
+        print(f'  -> {len(results)} products saved')
+    except Exception as e:
+        print(f'  -> Error: {e}')
+print('Done!')
+"
