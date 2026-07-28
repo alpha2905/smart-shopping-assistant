@@ -131,12 +131,12 @@ def wait_for_page_load(page: Page, timeout: int = 15000) -> None:
         pass
 
 
-def safe_goto(page: Page, url: str, timeout: int = 45000) -> bool:
+def safe_goto(page: Page, url: str, timeout: int = 45000, wait_until: str = "domcontentloaded") -> bool:
     """Navigate to URL with error handling and retry logic."""
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            response = page.goto(url, wait_until=wait_until, timeout=timeout)
             if response and response.status < 400:
                 wait_for_page_load(page, timeout=min(timeout, 15000))
                 return True

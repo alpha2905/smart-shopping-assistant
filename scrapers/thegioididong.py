@@ -33,7 +33,8 @@ class TheGioiDiDongScraper(BaseScraper):
             search_url = self.get_search_url(query)
             logger.info(f"Searching {self.site_name}: {search_url}")
 
-            if not safe_goto(page, search_url, timeout=45000):
+            # Dùng timeout ngắn hơn, chỉ chờ DOM content loaded
+            if not safe_goto(page, search_url, timeout=30000, wait_until="commit"):
                 logger.warning(f"Failed to load search page for {self.site_name}")
                 return products
 
