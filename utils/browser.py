@@ -32,10 +32,13 @@ class BrowserManager:
         self._browser: Optional[Browser] = None
 
     def __enter__(self):
+        # Dùng headless=new (Chrome 112+) - chế độ headless mới khó bị phát hiện hơn
+        headless_args = ["--headless=new"] if self.headless else []
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(
-            headless=self.headless,
+            headless=False,  # Tự quản lý headless qua args
             args=[
+                *headless_args,
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
@@ -45,6 +48,10 @@ class BrowserManager:
                 "--lang=vi-VN",
                 "--disable-notifications",
                 "--disable-popup-blocking",
+                "--window-size=1920,1080",
+                "--disable-font-subpixel-positioning",
+                "--enable-webgl",
+                "--enable-features=NetworkService,NetworkServiceInProcess",
             ],
             env={"LANG": "vi_VN.UTF-8", "LC_ALL": "vi_VN.UTF-8"}
         )

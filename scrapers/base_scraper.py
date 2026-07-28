@@ -147,7 +147,8 @@ class BaseScraper(ABC):
         """
         try:
             body_text = page.inner_text("body").strip().lower()
-            blocked_keywords = ["captcha", "blocked", "access denied", "robot", "bot", "429", "too many requests"]
+            # Chỉ check các keyword block rõ ràng, bỏ "robot" vì dễ false positive
+            blocked_keywords = ["captcha", "access denied", "429", "too many requests"]
             for keyword in blocked_keywords:
                 if keyword in body_text:
                     logger.warning(f"[{self.site_name}] Page appears to be blocked (keyword: {keyword})")
