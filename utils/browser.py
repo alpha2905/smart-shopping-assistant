@@ -60,17 +60,27 @@ class BrowserManager:
         """Create a new browser page with random user-agent and anti-detection settings."""
         selected_user_agent = random.choice(USER_AGENTS)
         selected_viewport = random.choice(VIEWPORT_SIZES)
-        
+
         page = self._browser.new_page(
             user_agent=selected_user_agent,
             viewport=selected_viewport,
             locale="vi-VN",
             timezone_id="Asia/Ho_Chi_Minh",
             no_viewport=False,
+            extra_http_headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "Connection": "keep-alive",
+                "Cache-Control": "max-age=0",
+            },
         )
         page.set_default_timeout(self.timeout)
 
-        # Comprehensive anti-detection script
         page.add_init_script("""
             // Override navigator.webdriver
             Object.defineProperty(navigator, 'webdriver', {
