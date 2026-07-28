@@ -4,7 +4,7 @@ on:
   schedule:
     # Chạy mỗi giờ vào phút thứ 0
     - cron: '0 * * * *'
-  workflow_dispatch:  # Cho phép chạy thủ công từ GitHub UI
+  workflow_dispatch:   # Cho phép chạy thủ công từ GitHub UI
 
 jobs:
   scrape:
@@ -34,25 +34,4 @@ jobs:
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           MONGO_DB: ${{ secrets.MONGO_DB }}
-        run: |
-          python -c "
-import asyncio
-import sys
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
-from utils.db import init_db, get_unique_queries, save_search_results
-from main import scrape_and_save
-
-init_db()
-queries = get_unique_queries()
-print(f'Found {len(queries)} queries to scrape: {queries}')
-for q in queries:
-    print(f'Scraping: {q}')
-    try:
-        results = scrape_and_save(q)
-        print(f'  -> {len(results)} products saved')
-    except Exception as e:
-        print(f'  -> Error: {e}')
-print('Done!')
-"
+        run: python scripts/hourly_scrape.py
