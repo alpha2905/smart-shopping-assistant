@@ -331,16 +331,48 @@ def filter_comparable_phones(products: List[Dict[str, Any]], query: str) -> List
         enriched["_price_numeric"] = parse_price(product.get("price", ""))
         candidates.append(enriched)
 
-    # DEBUG: log số lượng qua mỗi bước
+    # DEBUG: log chi tiết từng sản phẩm bị loại
     import logging
     logger = logging.getLogger(__name__)
+    
+    phone_like_count = sum(1 for p in products if is_phone_product(p.get("name", ""), p.get("product_url", "")))
     logger.info(
         "Filter debug: %d raw → %d phone-like → %d matched query → %d candidates",
         len(products),
-        sum(1 for p in products if is_phone_product(p.get("name", ""), p.get("product_url", ""))),
+        phone_like_count,
         len(candidates),
         len(candidates),
     )
+    
+    # Log tên sản phẩm bị loại ở bước is_phone_product
+    if phone_like_count < len(products):
+        rejected_phones = [
+            f"[{p.get('source', '')}] {p.get('name', '')[:60]}"
+            for p in products
+            if not is_phone_product(p.get("name", ""), p.get("product_url", ""))
+        ]
+        logger.warning(f"Rejected by is_phone_product ({len(rejected_phones)} items):")
+        for r in rejected_phones[:10]:  # Chỉ log 10 cái đầu
+            logger.warning(f"  - {r}")
+    
+    # Log tên sản phẩm bị loại ở bước matches_query_exact
+    phone_products = [p for p in products if is_phone_product(p.get("name", ""), p.get("product_url", ""))]
+    matched_names = [c.get("name", "") for c in candidates]
+    rejected_query = [
+        f"[{p.get('source', '')}] {p.get('name', '')[:60]}"
+        for p in phone_products
+        if p.get("name", "") not in matched_names
+    ]
+    if rejected_query:
+        logger.warning(f"Rejected by matches_query_exact ({len(rejected_query)} items):")
+        for r in rejected_query[:10]:
+            logger.warning(f"  - {r}")
+    
+    # Log candidates được giữ lại
+    if candidates:
+        logger.info(f"Candidates kept ({len(candidates)} items):")
+        for c in candidates[:5]:
+            logger.info(f"  ✓ [{c.get('source', '')}] {c.get('name', '')[:60]}")
 
     if not candidates:
         return []
