@@ -273,6 +273,23 @@ def matches_query_exact(name: str, query: str) -> bool:
                 return False
         return True
 
+    # FALLBACK: cho phép khớp linh hoạt hơn
+    # VD: query "reno 15" khớp với tên "reno15" (thiếu dấu cách)
+    query_tokens = set(norm_query.split())
+    name_tokens = set(norm_name.split())
+    
+    # Nếu tất cả token trong query đều xuất hiện trong tên sản phẩm
+    if query_tokens and query_tokens.issubset(name_tokens):
+        return True
+    
+    # Cho phép khớp từng phần: "reno15" chứa "reno" và "15"
+    if len(query_tokens) == 1 and len(query_tokens) > 0:
+        query_token = list(query_tokens)[0]
+        # Kiểm tra xem query_token có xuất hiện trong bất kỳ token nào của tên không
+        for name_token in name_tokens:
+            if query_token in name_token or name_token in query_token:
+                return True
+
     return False
 
 
