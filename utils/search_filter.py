@@ -331,6 +331,17 @@ def filter_comparable_phones(products: List[Dict[str, Any]], query: str) -> List
         enriched["_price_numeric"] = parse_price(product.get("price", ""))
         candidates.append(enriched)
 
+    # DEBUG: log số lượng qua mỗi bước
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "Filter debug: %d raw → %d phone-like → %d matched query → %d candidates",
+        len(products),
+        sum(1 for p in products if is_phone_product(p.get("name", ""), p.get("product_url", ""))),
+        len(candidates),
+        len(candidates),
+    )
+
     if not candidates:
         return []
 
