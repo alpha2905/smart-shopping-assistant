@@ -9,7 +9,7 @@ Single collection "products":
 import os
 import logging
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -152,6 +152,54 @@ def get_latest_prices_for_query(query: str) -> List[Dict[str, Any]]:
         })
     results.sort(key=lambda x: (x.get("source", ""), x.get("name", "")))
     return results
+
+
+def get_products_with_price_history(min_history: int = 3) -> List[Dict[str, Any]]:
+    """Return products that have at least `min_history` price entries."""
+    col = get_collection()
+    results = []
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        if len(price_history) >= min_history:
+            results.append({
+                "product_url": doc.get("product_url", ""),
+                "source": doc.get("source", ""),
+                "name": doc.get("name", ""),
+                "image_url": doc.get("image_url", ""),
+                "query": doc.get("query", ""),
+                "price_history_count": len(price_history),
+                "latest_price": price_history[-1].get("price", "") if price_history else "",
+            })
+    results.sort(key=lambda x: x.get("price_history_count", 0), reverse=True)
+    return results
+
+
+def save_prediction(product_url: str, source: str, prediction: Dict[str, Any]) -> None:
+    """Cache LSTM prediction in the product document."""
+    col = get_collection()
+    col.update_one(
+        {"product_url": product_url, "source": source},
+        {"$set": {
+            "prediction": prediction,
+            "prediction_updated_at": datetime.utcnow(),
+        }},
+    )
+    logger.info("Cached prediction for %s/%s", source, product_url[:50])
+
+
+def get_prediction(product_url: str, source: str) -> Optional[Dict[str, Any]]:
+    """Get cached prediction for a product, or None if not cached."""
+    col = get_collection()
+    doc = col.find_one(
+        {"product_url": product_url, "source": source},
+        {"prediction": 1, "prediction_updated_at": 1, "_id": 0},
+    )
+    if not doc or "prediction" not in doc:
+        return None
+    return {
+        "prediction": doc["prediction"],
+        "prediction_updated_at": doc.get("prediction_updated_at"),
+    }
 
 
 def get_unique_queries() -> List[str]:

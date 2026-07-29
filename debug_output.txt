@@ -1,0 +1,17 @@
+
+============================================================
+=== CELLPHONES ===
+============================================================
+Error: 'charmap' codec can't encode character '\u1ebf' in position 8: character maps to <undefined>
+
+============================================================
+=== FPTSHOP ===
+============================================================
+Error: 'charmap' codec can't encode character '\u1ea5' in position 13: character maps to <undefined>
+
+============================================================
+=== VIETTELSTORE ===
+============================================================
+Error: 'charmap' codec can't encode character '\u1ea1' in position 8: character maps to <undefined>
+
+Done!

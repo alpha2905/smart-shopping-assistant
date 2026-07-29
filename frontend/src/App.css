@@ -434,6 +434,191 @@ body {
   }
 }
 
+/* =========== PRODUCT BUTTONS =========== */
+.column-product-buttons {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.column-product-chart-btn {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 1px solid #e67e22;
+  background: transparent;
+  color: #e67e22;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.column-product-chart-btn:hover {
+  background: #e67e22;
+  color: white;
+}
+
+/* =========== PRICE CHART MODAL =========== */
+.price-chart-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.price-chart-modal {
+  background: #1a1a2e;
+  border-radius: 12px;
+  max-width: 800px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.price-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid #333;
+}
+
+.price-chart-header h3 {
+  color: #fff;
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.price-chart-close {
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0 8px;
+  transition: color 0.2s;
+}
+
+.price-chart-close:hover {
+  color: #e74c3c;
+}
+
+.price-chart-body {
+  padding: 20px;
+}
+
+.price-chart-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  color: #aaa;
+}
+
+.price-chart-spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #333;
+  border-top: 3px solid #e67e22;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-bottom: 12px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.price-chart-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 20px;
+  color: #e74c3c;
+  background: rgba(231, 76, 60, 0.1);
+  border-radius: 8px;
+}
+
+.price-chart-info {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.price-chart-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.price-chart-badge.cached {
+  background: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+}
+
+.price-chart-badge.fresh {
+  background: rgba(230, 126, 34, 0.2);
+  color: #e67e22;
+}
+
+.price-chart-model {
+  color: #aaa;
+  font-size: 0.8rem;
+}
+
+.price-chart-count {
+  color: #888;
+  font-size: 0.8rem;
+}
+
+.price-chart-table {
+  margin-top: 20px;
+}
+
+.price-chart-table h4 {
+  color: #ddd;
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+}
+
+.price-chart-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.price-chart-table th {
+  text-align: left;
+  padding: 8px 12px;
+  color: #888;
+  font-size: 0.8rem;
+  border-bottom: 1px solid #333;
+}
+
+.price-chart-table td {
+  padding: 8px 12px;
+  color: #ddd;
+  font-size: 0.85rem;
+  border-bottom: 1px solid #222;
+}
+
+.price-chart-table .predicted-price {
+  color: #e67e22;
+  font-weight: 600;
+}
+
 /* =========== FOOTER =========== */
 .app-footer {
   text-align: center;
@@ -442,4 +627,3 @@ body {
   font-size: 0.85rem;
   margin-top: auto;
 }
-

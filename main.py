@@ -11,7 +11,13 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from utils.browser import BrowserManager
-from utils.db import init_db, save_search_results, get_unique_queries, close_db
+from utils.db import (
+    init_db, save_search_results, get_unique_queries, close_db,
+    get_product_price_history, get_products_with_price_history,
+    save_prediction, get_prediction,
+)
+from utils.search_filter import filter_comparable_phones
+from utils.price_predictor import train_and_predict
 
 # Import 7 scraper
 from scrapers.fptshop import FPTShopScraper
@@ -81,7 +87,7 @@ def scrape_and_save(query: str) -> List[Dict[str, Any]]:
     ]
 
     all_products = []
-    max_products = 5
+    max_products = 15
 
     with ThreadPoolExecutor(max_workers=7) as executor:
         future_map = {
@@ -98,11 +104,16 @@ def scrape_and_save(query: str) -> List[Dict[str, Any]]:
             except Exception as e:
                 logger.error(f"Luồng thực thi {scraper_name} gặp sự cố: {e}")
 
-    # Lưu vào MongoDB
-    if all_products:
-        save_search_results(query, all_products)
+    filtered_products = filter_comparable_phones(all_products, query)
+    logger.info(
+        f"Lọc kết quả: {len(all_products)} sản phẩm thô → {len(filtered_products)} điện thoại khớp"
+    )
 
-    return all_products
+    # Lưu vào MongoDB (chỉ sản phẩm đã lọc, có thể so sánh giá)
+    if filtered_products:
+        save_search_results(query, filtered_products)
+
+    return filtered_products
 
 
 def scheduled_scrape_all():
@@ -164,4 +175,73 @@ def search_products(q: str = Query(..., description="Từ khóa tìm kiếm sả
         "query": q,
         "total": len(all_products),
         "products": all_products
+    }
+
+
+# ─── Price History + LSTM Prediction Endpoints ─────────────────────────
+
+@app.get("/api/products-with-history")
+def list_products_with_history():
+    """List all products that have enough price history for LSTM prediction."""
+    products = get_products_with_price_history(min_history=3)
+    return {
+        "total": len(products),
+        "products": products,
+    }
+
+
+@app.get("/api/price-history")
+def get_price_history(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+    force_retrain: bool = Query(False, description="Force retrain LSTM (bypass cache)"),
+):
+    """
+    Get price history + LSTM prediction for a product.
+
+    Strategy for speed:
+      1. Check cache first → return instantly if available
+      2. If no cache → train LSTM on-the-fly (fast, ~2-5s)
+      3. Cache result for next time
+    """
+    # 1. Check cache first (unless force_retrain)
+    if not force_retrain:
+        cached = get_prediction(product_url, source)
+        if cached:
+            logger.info("Returning cached prediction for %s/%s", source, product_url[:50])
+            return {
+                "product_url": product_url,
+                "source": source,
+                "cached": True,
+                "prediction_updated_at": cached.get("prediction_updated_at"),
+                **cached["prediction"],
+            }
+
+    # 2. Get price history from DB
+    price_history = get_product_price_history(product_url, source)
+    if not price_history:
+        return {
+            "product_url": product_url,
+            "source": source,
+            "error": "No price history found for this product",
+        }
+
+    # 3. Train LSTM and predict
+    result = train_and_predict(price_history, predict_days=7)
+    if result is None:
+        return {
+            "product_url": product_url,
+            "source": source,
+            "error": "Not enough price data for prediction (need ≥3 data points)",
+            "history_count": len(price_history),
+        }
+
+    # 4. Cache the prediction
+    save_prediction(product_url, source, result)
+
+    return {
+        "product_url": product_url,
+        "source": source,
+        "cached": False,
+        **result,
     }

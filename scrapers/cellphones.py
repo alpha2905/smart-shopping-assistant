@@ -29,22 +29,19 @@ class CellphoneSScraper(BaseScraper):
         try:
             search_url = self.get_search_url(query)
             logger.info(f"Searching {self.site_name}: {search_url}")
-            
+
             if not safe_goto(page, search_url, timeout=45000):
                 logger.warning(f"Failed to load search page for {self.site_name}")
                 return products
 
-            # Validate page loaded correctly
             if not self.is_search_page_valid(page):
                 logger.warning(f"[{self.site_name}] Search page appears invalid or blocked")
                 return products
 
-            # Wait for content to load and scroll for lazy loading
             self.wait_and_scroll(page, initial_wait=3000, scroll_times=4)
-            
+
             products = self.extract_product_info(page, query, max_products)
-            
-            # Try to get comments for first 2 products
+
             for product in products[:2]:
                 try:
                     comments = self.extract_comments(page, product.product_url)
@@ -59,69 +56,124 @@ class CellphoneSScraper(BaseScraper):
 
         return products
 
+    def _extract_from_element(self, element) -> dict:
+        """Extract product info from a single element using multiple strategies."""
+        result = {"name": "", "price": "Liên hệ", "image_url": "", "product_url": ""}
+
+        # Get the HTML for debugging
+        try:
+            html = element.inner_html()
+        except Exception:
+            html = ""
+
+        # ---- NAME ----
+        for sel in ["h3 a", "h3", "a.product__link", "a[title]", "a[href]", "div.product__name", 
+                    "[class*='product__name']", "[class*='name']", "[class*='title']"]:
+            try:
+                el = element.query_selector(sel)
+                if el:
+                    txt = el.get_attribute("title") or el.inner_text().strip()
+                    if txt and len(txt) > 3:
+                        result["name"] = txt
+                        break
+            except Exception:
+                continue
+
+        # ---- PRICE ----
+        for sel in ["p.product__price--show", "span.product__price--show", "[class*='price']",
+                    ".price", "span.price", "p.price", "strong.price",
+                    "[class*='Price']", "[class*='product__price']"]:
+            try:
+                el = element.query_selector(sel)
+                if el:
+                    txt = el.inner_text().strip()
+                    if txt and any(c.isdigit() for c in txt):
+                        result["price"] = txt
+                        break
+            except Exception:
+                continue
+
+        # ---- IMAGE ----
+        for sel in ["img.product__img", "img.thumb", "img"]:
+            try:
+                el = element.query_selector(sel)
+                if el:
+                    url = el.get_attribute("data-src") or el.get_attribute("src") or ""
+                    if url:
+                        result["image_url"] = url
+                        break
+            except Exception:
+                continue
+
+        # ---- URL ----
+        for sel in ["a.product__link", "a[href]", "a"]:
+            try:
+                el = element.query_selector(sel)
+                if el:
+                    href = el.get_attribute("href") or ""
+                    if href and href != "#" and href != "/":
+                        result["product_url"] = href
+                        break
+            except Exception:
+                continue
+
+        return result
+
     def extract_product_info(self, page: Page, query: str, max_products: int) -> List[Product]:
         products = []
         try:
-            # Cập nhật selector chuẩn xác theo cấu trúc HTML thực tế của CellphoneS
-            product_elements = page.query_selector_all("div.product-info-container, div.product-item")
-            
+            # Multiple outer container selectors
+            product_elements = []
+            for sel in [
+                "div.product-info-container",
+                "div.product-item",
+                ".product-item",
+                ".item",
+                "li.item",
+                "[class*='product']",
+                "div[class*='cate'] div[class*='item']",
+                "div[class*='category'] div[class*='item']",
+            ]:
+                product_elements = page.query_selector_all(sel)
+                if product_elements:
+                    logger.info(f"[{self.site_name}] Found elements with selector '{sel}': {len(product_elements)}")
+                    break
+
             if not product_elements:
-                product_elements = page.query_selector_all(".product-item, .item")
+                # Last resort: look for any container with product links
+                product_elements = page.query_selector_all("a[href*='/product'], a[href*='/mobile'], a[href*='/dtdd']")
 
             logger.info(f"Found {len(product_elements)} product elements on {self.site_name}")
-            
+
             for element in product_elements[:max_products]:
                 try:
-                    # 1. Lấy tên sản phẩm từ thẻ h3 hoặc .product__name
-                    name_el = element.query_selector("div.product__name h3, h3, .product__name")
-                    name = ""
-                    if name_el:
-                        name = name_el.inner_text().strip()
-                    if not name:
-                        link_el = element.query_selector("a.product__link")
-                        if link_el:
-                            name = (
-                                link_el.get_attribute("title") or 
-                                link_el.get_attribute("aria-label") or ""
-                            )
-                    
-                    # 2. Lấy giá sản phẩm từ p.product__price--show
-                    price_el = element.query_selector("p.product__price--show, .product__price--show")
-                    price = price_el.inner_text().strip() if price_el else "Liên hệ"
-                    
-                    # 3. Lấy ảnh sản phẩm từ thẻ img
-                    img_el = element.query_selector("img.product__img, img")
-                    image_url = ""
-                    if img_el:
-                        image_url = (
-                            img_el.get_attribute("src") or 
-                            img_el.get_attribute("data-src") or ""
-                        )
-                    
-                    # 4. Lấy đường dẫn chi tiết sản phẩm từ thẻ a.product__link
-                    link_el = element.query_selector("a.product__link, a[href]")
-                    product_url = ""
-                    if link_el:
-                        href = link_el.get_attribute("href") or ""
+                    info = self._extract_from_element(element)
+
+                    if not self._is_phone_product(info["name"], info["product_url"]):
+                        logger.debug(f"Bỏ qua sản phẩm không phải điện thoại: {info['name'][:50]}")
+                        continue
+
+                    if info["name"] and info["product_url"]:
+                        # Normalize URL
+                        href = info["product_url"]
                         if href.startswith("/"):
-                            product_url = self.base_url + href
+                            href = self.base_url + href
                         elif href.startswith("http"):
-                            product_url = href
-                        elif href and not href.startswith("#"):
-                            product_url = href
-                    
-                    if name:
+                            pass
+                        else:
+                            continue
+
                         products.append(Product(
-                            name=name.strip(),
-                            price=price.strip(),
-                            image_url=image_url.strip(),
-                            product_url=product_url.strip(),
+                            name=info["name"].strip(),
+                            price=info["price"].strip(),
+                            image_url=info["image_url"].strip(),
+                            product_url=href.strip(),
                             source=self.site_name
                         ))
                 except Exception as e:
                     logger.debug(f"Error extracting product element: {e}")
                     continue
-                    
+
         except Exception as e:
             logger.warning(f"Error in extract_product_info for {self.site_name}: {e}")
 
@@ -132,19 +184,20 @@ class CellphoneSScraper(BaseScraper):
         try:
             if not product_url:
                 return comments
-            
+
             if not safe_goto(page, product_url, timeout=20000):
                 return comments
-            
+
             page.wait_for_timeout(2000)
-            
-            comment_elements = page.query_selector_all(
-                ".comment-content, .review-content, .customer-review, "
-                ".rating-content p, [class*='comment'] p, [class*='review'] p, "
-                ".product-comment p, .comment-item p, .feedback-content p, "
-                "[class*='feedback'] p, .rc-review p, .customer-comment p"
-            )
-            
+
+            comment_selectors = [
+                ".comment-content", ".review-content", ".customer-review",
+                ".rating-content p", "[class*='comment'] p", "[class*='review'] p",
+                ".product-comment p", ".comment-item p", ".feedback-content p",
+                "[class*='feedback'] p", ".rc-review p", ".customer-comment p"
+            ]
+            comment_elements = page.query_selector_all(", ".join(comment_selectors))
+
             for el in comment_elements[:10]:
                 try:
                     text = el.inner_text().strip()
@@ -152,18 +205,18 @@ class CellphoneSScraper(BaseScraper):
                         comments.append(text)
                 except Exception:
                     continue
-                    
+
         except Exception as e:
             logger.debug(f"Error extracting comments from {product_url}: {e}")
 
         return comments
+
 
 if __name__ == "__main__":
     import json
     import sys
     import os
 
-    # Đảm bảo nhận diện đúng thư mục gốc nếu chạy trực tiếp
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
     logging.basicConfig(
@@ -173,23 +226,23 @@ if __name__ == "__main__":
     )
 
     print("=== BẮT ĐẦU TEST CELLPHONES SCRAPER ===")
-    
+
     with BrowserManager(headless=False) as browser_manager:
         try:
             scraper = CellphoneSScraper(browser_manager=browser_manager)
-            
+
             query_keyword = input("Nhập từ khóa tìm kiếm (ví dụ: iPhone, Samsung): ").strip()
             max_results = 3
-            
+
             print(f"Đang tìm kiếm: '{query_keyword}'...")
             products = scraper.search(query=query_keyword, max_products=max_results)
 
             print(f"\nKết quả tìm thấy: {len(products)} sản phẩm\n" + "-" * 50)
-            
+
             products_data = []
             for idx, prod in enumerate(products, 1):
                 print(f"[{idx}] Tên: {prod.name} - Giá: {prod.price}")
-                
+
                 prod_dict = {
                     "name": prod.name,
                     "price": prod.price,
@@ -203,7 +256,7 @@ if __name__ == "__main__":
             output_file = "cellphones_results.json"
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(products_data, f, ensure_ascii=False, indent=4)
-            
+
             print(f"\nĐã xuất kết quả thành công ra file: {os.path.abspath(output_file)}")
 
         except Exception as e:

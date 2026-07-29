@@ -124,6 +124,11 @@ class ViettelStoreScraper(BaseScraper):
                         elif href.startswith("http"):
                             product_url = href
 
+                    # Chỉ giữ sản phẩm là điện thoại
+                    if not self._is_phone_product(name, product_url):
+                        logger.debug(f"Bỏ qua sản phẩm không phải điện thoại: {name[:50]}")
+                        continue
+
                     if name and product_url:
                         products.append(Product(
                             name=name.strip(),

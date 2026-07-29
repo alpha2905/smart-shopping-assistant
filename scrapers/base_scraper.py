@@ -158,6 +158,61 @@ class BaseScraper(ABC):
             logger.debug(f"[{self.site_name}] Error checking page validity: {e}")
             return False
 
+    def _is_phone_product(self, name: str, product_url: str = "") -> bool:
+        """
+        Kiểm tra sản phẩm có phải điện thoại không.
+        Lọc ra phụ kiện, tablet, laptop, tai nghe, v.v. ngay tại lúc crawl.
+        """
+        if not name:
+            return False
+
+        import unicodedata
+        def normalize(s):
+            s = unicodedata.normalize("NFD", s.lower())
+            s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+            return s
+
+        norm_name = normalize(name)
+        norm_url = normalize(product_url.replace("-", " ").replace("/", " "))
+
+        # Từ khóa loại trừ — không phải điện thoại
+        non_phone_keywords = [
+            "tai nghe", "op lung", "sac du phong", "pin du phong", "sac khong day",
+            "cap sac", "cap type c", "cap lightning", "cap usb", "cap chuyen doi",
+            "loa bluetooth", "loa di dong", "may tinh bang", "tablet", "ipad",
+            "laptop", "macbook", "dong ho thong minh", "smartwatch", "apple watch",
+            "airpods", "phu kien", "phụ kiện", "bao da", "op dien thoai",
+            "kinh cuong luc", "cuong luc", "dan man hinh", "mieng dan man hinh",
+            "chuot", "ban phim", "the nho", "o cung di dong", "usb",
+            "camera", "may anh", "tivi", "man hinh may tinh",
+            "pin laptop", "tai nghe bluetooth", "tai nghe co day",
+            "micro", "gimbal", "tripod", "chan may", "gia do dien thoai",
+            "mieng dan", "op luung", "cuongluc", "balo", "tui xach",
+            "may doc sach", "kindle", "may choi game", "tay cam choi game",
+            "router", "modem", "sim", "the sim", "thiet bi mang",
+        ]
+
+        for kw in non_phone_keywords:
+            norm_kw = normalize(kw)
+            if norm_kw in norm_name:
+                return False
+
+        # URL chứa từ khóa điện thoại → chắc chắn là điện thoại
+        if any(h in norm_url for h in ["dien thoai", "dien-thoai", "phone", "smartphone", "/mobile"]):
+            return True
+
+        # Tên chứa thương hiệu/dòng điện thoại
+        phone_hints = [
+            "iphone", "galaxy", "redmi", "poco", "xiaomi", "oppo", "vivo", "realme",
+            "nokia", "huawei", "honor", "oneplus", "pixel", "zenfone", "rog phone",
+            "dien thoai", "smartphone",
+        ]
+        if any(h in norm_name for h in phone_hints):
+            return True
+
+        # Mặc định: coi là điện thoại nếu không khớp từ khóa loại trừ
+        return True
+
     def wait_and_scroll(self, page: Page, initial_wait: int = 3000, scroll_times: int = 3) -> None:
         """Wait for page to load initial content and then scroll to trigger lazy loading."""
         try:

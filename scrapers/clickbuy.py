@@ -110,6 +110,11 @@ class ClickbuyScraper(BaseScraper):
                         elif href and not href.startswith("#"):
                             product_url = href
                     
+                    # Chỉ giữ sản phẩm là điện thoại
+                    if not self._is_phone_product(name, product_url):
+                        logger.debug(f"Bỏ qua sản phẩm không phải điện thoại: {name[:50]}")
+                        continue
+
                     if name:
                         products.append(Product(
                             name=name.strip(),
