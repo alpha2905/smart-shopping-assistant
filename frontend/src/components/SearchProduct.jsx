@@ -41,7 +41,6 @@ export default function SearchProduct() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [storeStatus, setStoreStatus] = useState({});
-  const [chartProduct, setChartProduct] = useState(null);
   const [cached, setCached] = useState(false);
 
   // Nhóm sản phẩm theo source
@@ -194,24 +193,17 @@ export default function SearchProduct() {
               <div className="column-product-info">
                 <h4 className="column-product-name" title={prod.name}>{prod.name}</h4>
                 <p className="column-product-price">{prod.price}</p>
-                <div className="column-product-buttons">
-                  <a 
-                    href={prod.product_url} 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    className="column-product-link"
-                    style={{ backgroundColor: color }}
-                  >
-                    Xem chi tiết →
-                  </a>
-                  <button
-                    className="column-product-chart-btn"
-                    onClick={() => setChartProduct(prod)}
-                    title="Xem biểu đồ giá + dự báo LSTM"
-                  >
-                    📊 Giá
-                  </button>
-                </div>
+                <a 
+                  href={prod.product_url} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  className="column-product-link"
+                  style={{ backgroundColor: color }}
+                >
+                  Xem chi tiết →
+                </a>
+                {/* Biểu đồ LSTM inline - tự động hiển thị */}
+                <PriceChart product={prod} />
               </div>
             </div>
           ))}
@@ -272,14 +264,6 @@ export default function SearchProduct() {
       <div className="stores-grid">
         {STORES.map(store => renderStoreColumn(store))}
       </div>
-
-      {/* Modal biểu đồ giá + dự báo LSTM */}
-      {chartProduct && (
-        <PriceChart
-          product={chartProduct}
-          onClose={() => setChartProduct(null)}
-        />
-      )}
     </div>
   );
 }

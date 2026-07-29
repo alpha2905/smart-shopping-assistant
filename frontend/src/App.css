@@ -485,6 +485,60 @@ body {
   cursor: not-allowed;
 }
 
+/* =========== INLINE PRICE CHART =========== */
+.inline-price-chart {
+  margin-top: 8px;
+  padding: 8px;
+  background: #1a1a2e;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+.inline-chart-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+}
+
+.inline-chart-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid #333;
+  border-top: 2px solid #e67e22;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.inline-chart-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.inline-chart-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.inline-chart-badge.cached {
+  background: rgba(46, 204, 113, 0.2);
+  color: #2ecc71;
+}
+
+.inline-chart-badge.fresh {
+  background: rgba(230, 126, 34, 0.2);
+  color: #e67e22;
+}
+
+.inline-chart-count {
+  color: #888;
+  font-size: 0.7rem;
+}
+
 /* =========== PRODUCT BUTTONS =========== */
 .column-product-buttons {
   display: flex;
