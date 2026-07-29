@@ -220,7 +220,7 @@ def is_phone_product(name: str, product_url: str = "") -> bool:
         if hint.replace("-", " ") in norm_url or hint in product_url.lower():
             return True
 
-    phone_name_hints = ["iphone", "galaxy", "redmi", "poco", "pixel", "zenfone", "rog phone"]
+    phone_name_hints = ["iphone", "galaxy", "redmi", "poco", "pixel", "zenfone", "rog phone", "reno", "find", "a series", "a-series"]
     if any(h in norm_name for h in phone_name_hints):
         return True
 
