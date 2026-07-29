@@ -434,6 +434,57 @@ body {
   }
 }
 
+/* =========== CACHE BAR =========== */
+.cache-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 1rem auto;
+  max-width: 800px;
+}
+
+.cache-badge {
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.cache-badge.cached {
+  background: rgba(46, 204, 113, 0.15);
+  color: #27ae60;
+  border: 1px solid rgba(46, 204, 113, 0.3);
+}
+
+.cache-badge.fresh {
+  background: rgba(52, 152, 219, 0.15);
+  color: #2980b9;
+  border: 1px solid rgba(52, 152, 219, 0.3);
+}
+
+.refresh-btn {
+  padding: 6px 16px;
+  background: white;
+  border: 1px solid #667eea;
+  color: #667eea;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: #667eea;
+  color: white;
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* =========== PRODUCT BUTTONS =========== */
 .column-product-buttons {
   display: flex;

@@ -42,6 +42,7 @@ export default function SearchProduct() {
   const [error, setError] = useState(null);
   const [storeStatus, setStoreStatus] = useState({});
   const [chartProduct, setChartProduct] = useState(null);
+  const [cached, setCached] = useState(false);
 
   // Nhóm sản phẩm theo source
   const groupedProducts = {};
@@ -55,6 +56,34 @@ export default function SearchProduct() {
       groupedProducts[key].push(prod);
     }
   });
+
+  const handleForceRefresh = async () => {
+    if (!keyword.trim()) return;
+    setLoading(true);
+    setError(null);
+    setProducts([]);
+    const initialStatus = {};
+    STORES.forEach(store => { initialStatus[store.key] = 'loading'; });
+    setStoreStatus(initialStatus);
+
+    try {
+      const response = await axios.get(`http://localhost:8000/api/search?q=${encodeURIComponent(keyword)}&force_refresh=true`);
+      const resultProducts = response.data.products || [];
+      setProducts(resultProducts);
+      setCached(false);
+      const newStatus = {};
+      STORES.forEach(store => {
+        const hasProducts = resultProducts.some(p => SOURCE_TO_KEY[p.source] === store.key);
+        newStatus[store.key] = hasProducts ? 'done' : 'empty';
+      });
+      setStoreStatus(newStatus);
+    } catch (err) {
+      console.error("Lỗi force refresh:", err);
+      setError("Không thể scrape lại. Hãy thử lại.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -76,6 +105,7 @@ export default function SearchProduct() {
       const response = await axios.get(`http://localhost:8000/api/search?q=${encodeURIComponent(keyword)}`);
       const resultProducts = response.data.products || [];
       setProducts(resultProducts);
+      setCached(response.data.cached || false);
       
       // Cập nhật trạng thái cho từng sàn
       const newStatus = {};
@@ -216,6 +246,25 @@ export default function SearchProduct() {
           <span className="error-icon">⚠️</span>
           <p>{error}</p>
           <p className="error-hint">Hãy đảm bảo backend đang chạy ở http://localhost:8000</p>
+        </div>
+      )}
+
+      {/* Badge cache + nút scrape lại */}
+      {products.length > 0 && (
+        <div className="cache-bar">
+          {cached ? (
+            <span className="cache-badge cached">⚡ Dữ liệu từ DB (trả về ngay)</span>
+          ) : (
+            <span className="cache-badge fresh">🔄 Vừa scrape mới</span>
+          )}
+          <button
+            className="refresh-btn"
+            onClick={() => handleForceRefresh()}
+            disabled={loading}
+            title="Scrape lại từ 7 sàn (bỏ qua cache)"
+          >
+            {loading ? 'Đang scrape...' : '🔄 Scrape lại'}
+          </button>
         </div>
       )}
 

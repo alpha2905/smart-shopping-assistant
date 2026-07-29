@@ -14,7 +14,7 @@ from utils.browser import BrowserManager
 from utils.db import (
     init_db, save_search_results, get_unique_queries, close_db,
     get_product_price_history, get_products_with_price_history,
-    save_prediction, get_prediction,
+    save_prediction, get_prediction, get_latest_prices_for_query,
 )
 from utils.search_filter import filter_comparable_phones
 from utils.price_predictor import train_and_predict
@@ -168,13 +168,31 @@ def shutdown():
 # ─── API Endpoint ──────────────────────────────────────────────────────
 
 @app.get("/api/search")
-def search_products(q: str = Query(..., description="Từ khóa tìm kiếm sản phẩm")):
+def search_products(
+    q: str = Query(..., description="Từ khóa tìm kiếm sản phẩm"),
+    force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
+):
+    # 1. Nếu không force_refresh, check DB trước → trả về ngay nếu đã có
+    if not force_refresh:
+        cached = get_latest_prices_for_query(q)
+        if cached:
+            logger.info("Query '%s' found in DB, returning %d cached products instantly", q, len(cached))
+            return {
+                "query": q,
+                "total": len(cached),
+                "products": cached,
+                "cached": True,
+            }
+
+    # 2. Nếu chưa có trong DB (hoặc force_refresh) → scrape từ 7 sàn
+    logger.info("Query '%s' not in DB (or force_refresh), scraping from 7 stores...", q)
     all_products = scrape_and_save(q)
 
     return {
         "query": q,
         "total": len(all_products),
-        "products": all_products
+        "products": all_products,
+        "cached": False,
     }
 
 
