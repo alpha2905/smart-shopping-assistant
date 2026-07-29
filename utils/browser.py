@@ -8,7 +8,7 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 ]
 
 VIEWPORT_SIZES = [
@@ -32,27 +32,27 @@ class BrowserManager:
         self._browser: Optional[Browser] = None
 
     def __enter__(self):
-        # Dùng headless=new (Chrome 112+) - chế độ headless mới khó bị phát hiện hơn
-        headless_args = ["--headless=new"] if self.headless else []
         self._playwright = sync_playwright().start()
+
+        launch_args = [
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-gpu",
+            "--disable-web-security",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--lang=vi-VN",
+            "--disable-notifications",
+            "--disable-popup-blocking",
+        ]
+        # Add --headless=new via args for newer Chromium stealth headless mode,
+        # instead of setting headless=True on the launch object (which is easily detectable).
+        if self.headless:
+            launch_args.append("--headless=new")
+
         self._browser = self._playwright.chromium.launch(
-            headless=False,  # Tự quản lý headless qua args
-            args=[
-                *headless_args,
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-web-security",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--lang=vi-VN",
-                "--disable-notifications",
-                "--disable-popup-blocking",
-                "--window-size=1920,1080",
-                "--disable-font-subpixel-positioning",
-                "--enable-webgl",
-                "--enable-features=NetworkService,NetworkServiceInProcess",
-            ],
+            headless=self.headless,
+            args=launch_args,
             env={"LANG": "vi_VN.UTF-8", "LC_ALL": "vi_VN.UTF-8"}
         )
         return self
@@ -89,14 +89,34 @@ class BrowserManager:
         page.set_default_timeout(self.timeout)
 
         page.add_init_script("""
-            // Override navigator.webdriver
+            // Override navigator.webdriver (Playwright already does this, but be safe)
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => undefined
             });
 
-            // Override navigator.plugins (headless Chrome has 0 plugins)
+            // Override navigator.plugins with realistic plugin-like objects
+            // (headless Chrome has empty plugins array which is a signal)
+            const makePlugin = (name, desc, filename) => ({
+                name,
+                description: desc,
+                filename,
+                length: 0,
+                item: () => null,
+                namedItem: () => null,
+                [Symbol.iterator]: function*() {}
+            });
             Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5]
+                get: () => {
+                    const arr = [
+                        makePlugin('Chrome PDF Plugin', 'Portable Document Format', 'internal-pdf-viewer'),
+                        makePlugin('Chrome PDF Viewer', '', 'mhjfbmdgcfjbbpaeojofohoefgiehjai'),
+                        makePlugin('Native Client', '', 'internal-nacl-plugin'),
+                    ];
+                    arr.item = i => arr[i] || null;
+                    arr.namedItem = name => arr.find(p => p.name === name) || null;
+                    arr.refresh = () => {};
+                    return arr;
+                }
             });
 
             // Override languages
@@ -108,9 +128,6 @@ class BrowserManager:
             Object.defineProperty(navigator, 'platform', {
                 get: () => 'Win32'
             });
-
-            // Remove chrome runtime
-            delete window.chrome;
 
             // Override navigator.permissions
             const originalQuery = window.navigator.permissions.query;
@@ -129,6 +146,11 @@ class BrowserManager:
 
             // Override hardwareConcurrency
             Object.defineProperty(navigator, 'hardwareConcurrency', {
+                get: () => 4 + Math.floor(Math.random() * 4)
+            });
+
+            // Override deviceMemory (not present in headless)
+            Object.defineProperty(navigator, 'deviceMemory', {
                 get: () => 4 + Math.floor(Math.random() * 4)
             });
         """)
