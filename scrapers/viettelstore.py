@@ -70,8 +70,19 @@ class ViettelStoreScraper(BaseScraper):
     def extract_product_info(self, page: Page, query: str, max_products: int) -> List[Product]:
         products = []
         try:
-            # Cập nhật selector chuẩn xác theo cấu trúc HTML thực tế của Viettel Store
-            product_elements = page.query_selector_all("div.product-item, div.product-info-container")
+            # Thử nhiều selector khác nhau cho Viettel Store
+            product_elements = []
+            for sel in [
+                "div.product-item", "div.product-info-container",
+                "div[class*='product']", "div[class*='item']",
+                "li[class*='product']", "div.box-product",
+                "div.cat-product", "div.prd-item",
+                ".item", "li.item",
+            ]:
+                product_elements = page.query_selector_all(sel)
+                if product_elements:
+                    logger.info(f"[{self.site_name}] Found elements with selector '{sel}': {len(product_elements)}")
+                    break
 
             logger.info(f"Found {len(product_elements)} product elements on {self.site_name}")
 

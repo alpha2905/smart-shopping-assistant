@@ -174,7 +174,13 @@ def wait_for_page_load(page: Page, timeout: int = 15000) -> None:
 
 
 def safe_goto(page: Page, url: str, timeout: int = 45000, wait_until: str = "domcontentloaded") -> bool:
-    """Navigate to URL with error handling and retry logic."""
+    """Navigate to URL with error handling and retry logic.
+    
+    For 403 errors, try alternate navigation strategies:
+    - Use commit instead of full load
+    - Add random delays between retries
+    - Try with different navigation strategy
+    """
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -182,7 +188,24 @@ def safe_goto(page: Page, url: str, timeout: int = 45000, wait_until: str = "dom
             if response and response.status < 400:
                 wait_for_page_load(page, timeout=min(timeout, 15000))
                 return True
-            logger.warning(f"Attempt {attempt + 1}: Got status {response.status if response else 'None'} for {url}")
+            elif response and response.status == 403:
+                # 403 means blocked - try with "commit" strategy
+                logger.warning(f"Attempt {attempt + 1}: Got 403 for {url}, trying alternate navigation...")
+                # Small delay to avoid rate limiting
+                page.wait_for_timeout(2000)
+                # Try with commit navigation
+                response2 = page.goto(url, wait_until="commit", timeout=timeout)
+                if response2 and response2.status < 400:
+                    wait_for_page_load(page, timeout=min(timeout, 15000))
+                    return True
+                # Try with load state
+                page.wait_for_timeout(3000)
+                response3 = page.goto(url, wait_until="load", timeout=timeout)
+                if response3 and response3.status < 400:
+                    wait_for_page_load(page, timeout=min(timeout, 15000))
+                    return True
+            else:
+                logger.warning(f"Attempt {attempt + 1}: Got status {response.status if response else 'None'} for {url}")
         except Exception as e:
             logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
             if attempt == max_retries - 1:
