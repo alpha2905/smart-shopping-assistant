@@ -177,10 +177,23 @@ def get_products_with_price_history(min_history: int = 3) -> List[Dict[str, Any]
 def save_prediction(product_url: str, source: str, prediction: Dict[str, Any]) -> None:
     """Cache LSTM prediction in the product document."""
     col = get_collection()
+
+    # Convert numpy types to native Python types for JSON serialization
+    def convert_numpy(obj):
+        if isinstance(obj, dict):
+            return {k: convert_numpy(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_numpy(v) for v in obj]
+        elif hasattr(obj, "item"):  # numpy scalars
+            return obj.item()
+        return obj
+
+    cleaned_prediction = convert_numpy(prediction)
+
     col.update_one(
         {"product_url": product_url, "source": source},
         {"$set": {
-            "prediction": prediction,
+            "prediction": cleaned_prediction,
             "prediction_updated_at": datetime.utcnow(),
         }},
     )

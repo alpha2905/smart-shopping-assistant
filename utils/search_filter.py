@@ -242,10 +242,14 @@ def matches_query_exact(name: str, query: str) -> bool:
     if not norm_query:
         return False
 
+    # Nếu query chỉ là 1 brand prefix (VD: "samsung"), không xóa prefix khỏi tên
+    query_is_brand_only = norm_query in BRAND_PREFIXES
+
     for prefix in BRAND_PREFIXES:
         if norm_query.startswith(prefix + " "):
             norm_query = norm_query[len(prefix) + 1 :].strip()
-        if norm_name.startswith(prefix + " "):
+        # Chỉ xóa prefix khỏi tên nếu query không phải là brand đó
+        if not query_is_brand_only and norm_name.startswith(prefix + " "):
             norm_name = norm_name[len(prefix) + 1 :].strip()
 
     # Query phải xuất hiện nguyên vẹn trong tên sản phẩm

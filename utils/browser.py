@@ -44,12 +44,15 @@ class BrowserManager:
             "--lang=vi-VN",
             "--disable-notifications",
             "--disable-popup-blocking",
+            # Giảm thiểu phát hiện headless
+            "--disable-setuid-sandbox",
+            "--window-size=1920,1080",
+            "--start-maximized",
         ]
-        # Add --headless=new via args for newer Chromium stealth headless mode,
-        # instead of setting headless=True on the launch object (which is easily detectable).
-        if self.headless:
-            launch_args.append("--headless=new")
 
+        # Playwright xử lý headless mode nội bộ.
+        # Không pass --headless=new qua args vì có thể conflict với Playwright.
+        # Playwright >= 1.48 dùng headless="shell" cho chế độ headless mới.
         self._browser = self._playwright.chromium.launch(
             headless=self.headless,
             args=launch_args,

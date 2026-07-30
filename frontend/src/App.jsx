@@ -1,5 +1,6 @@
 import React from 'react'
 import SearchProduct from './components/SearchProduct'
+import ChatBot from './components/ChatBot'
 
 function App() {
   return (
@@ -21,6 +22,9 @@ function App() {
       <footer className="app-footer">
         <p>Dữ liệu được thu thập từ các trang thương mại điện tử đối tác</p>
       </footer>
+
+      {/* ChatBot floating button */}
+      <ChatBot />
     </div>
   )
 }

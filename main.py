@@ -18,6 +18,11 @@ from utils.db import (
 )
 from utils.search_filter import filter_comparable_phones
 from utils.price_predictor import train_and_predict
+from utils.chatbot import get_chat_response
+from utils.recommendation_engine import (
+    calculate_pqs, calculate_price_statistics, get_buy_recommendation,
+    analyze_product, analyze_products_batch,
+)
 
 # Import 7 scraper
 from scrapers.fptshop import FPTShopScraper
@@ -46,7 +51,10 @@ scheduler = BackgroundScheduler()
 
 
 def run_single_scraper(scraper_class, query: str, max_products: int = 5) -> List[Dict[str, Any]]:
-    """Hàm chạy từng scraper, có thiết lập riêng event loop cho luồng phụ trên Windows."""
+    """
+    Hàm chạy từng scraper với BrowserManager riêng (thread-safe).
+    Mỗi scraper có browser instance riêng để tránh conflict.
+    """
     if sys.platform == 'win32':
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -89,7 +97,9 @@ def scrape_and_save(query: str) -> List[Dict[str, Any]]:
     all_products = []
     max_products = 15
 
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    # Mỗi scraper dùng BrowserManager riêng (thread-safe)
+    # Giới hạn max_workers=3 để tránh quá tải RAM/CPU
+    with ThreadPoolExecutor(max_workers=3) as executor:
         future_map = {
             executor.submit(run_single_scraper, sc, query, max_products): sc.__name__
             for sc in scraper_classes
@@ -262,4 +272,166 @@ def get_price_history(
         "source": source,
         "cached": False,
         **result,
+    }
+
+
+# ─── Chatbot Endpoint ──────────────────────────────────────────────────
+
+@app.post("/api/chat")
+def chat_endpoint(message: Dict[str, Any]):
+    """
+    Chatbot endpoint for shopping assistant.
+    Accepts: {"message": "Tìm iPhone 16 Pro Max"}
+    Returns: {"text": "...", "intent": "search", "query": "iPhone 16 Pro Max"}
+    """
+    user_message = message.get("message", "").strip()
+    if not user_message:
+        return {
+            "text": "Bạn chưa nhập tin nhắn. Hãy gửi tin nhắn để tôi hỗ trợ bạn nhé! 😊",
+            "intent": "empty",
+            "query": None,
+        }
+
+    logger.info(f"Chat request: '{user_message[:100]}'")
+    response = get_chat_response(user_message)
+    return response
+
+
+# ─── Product Quality Score (PQS) & Recommendation Endpoints ────────────
+
+@app.get("/api/product-analysis")
+def product_analysis(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """
+    Phân tích tổng thể sản phẩm: PQS, thống kê giá, khuyến nghị mua hàng.
+    """
+    # Get product info from DB
+    price_history = get_product_price_history(product_url, source)
+    if not price_history:
+        return {"error": "No data found for this product"}
+
+    # Get latest product info
+    latest = price_history[-1] if price_history else {}
+    product = {
+        "name": latest.get("name", ""),
+        "price": latest.get("price", ""),
+        "product_url": product_url,
+        "source": source,
+    }
+
+    # Get forecast if available
+    forecast = get_prediction(product_url, source)
+    forecast_result = forecast.get("prediction") if forecast else None
+
+    # Run full analysis
+    result = analyze_product(
+        product=product,
+        comments=latest.get("comments", []),
+        forecast_result=forecast_result,
+    )
+    return result
+
+
+@app.get("/api/product-pqs")
+def product_pqs(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """
+    Tính Product Quality Score (PQS) cho một sản phẩm.
+    """
+    price_history = get_product_price_history(product_url, source)
+    if not price_history:
+        return {"error": "No data found for this product"}
+
+    latest = price_history[-1] if price_history else {}
+    product = {
+        "name": latest.get("name", ""),
+        "price": latest.get("price", ""),
+        "product_url": product_url,
+        "source": source,
+    }
+
+    pqs_result = calculate_pqs(
+        product=product,
+        comments=latest.get("comments", []),
+    )
+    return pqs_result
+
+
+@app.get("/api/price-statistics")
+def price_statistics(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """
+    Thống kê giá: min, max, avg, current, volatility.
+    """
+    stats = calculate_price_statistics(product_url, source)
+    if not stats:
+        return {"error": "Not enough price history (need >=2 data points)"}
+    return stats
+
+
+@app.get("/api/buy-recommendation")
+def buy_recommendation(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """
+    Khuyến nghị mua hàng dựa trên PQS, giá, dự báo.
+    """
+    price_history = get_product_price_history(product_url, source)
+    if not price_history:
+        return {"error": "No data found for this product"}
+
+    latest = price_history[-1] if price_history else {}
+    product = {
+        "name": latest.get("name", ""),
+        "price": latest.get("price", ""),
+        "product_url": product_url,
+        "source": source,
+    }
+
+    # Get PQS
+    pqs_result = calculate_pqs(
+        product=product,
+        comments=latest.get("comments", []),
+    )
+
+    # Get price stats
+    price_stats = calculate_price_statistics(product_url, source)
+
+    # Get forecast
+    forecast = get_prediction(product_url, source)
+    forecast_result = forecast.get("prediction") if forecast else None
+
+    # Get recommendation
+    recommendation = get_buy_recommendation(
+        product=product,
+        pqs_result=pqs_result,
+        price_stats=price_stats,
+        forecast_result=forecast_result,
+    )
+    return recommendation
+
+
+@app.get("/api/products-ranked")
+def products_ranked(
+    query: str = Query(..., description="Search query"),
+):
+    """
+    Danh sách sản phẩm xếp hạng theo PQS cho một query.
+    """
+    products = get_latest_prices_for_query(query)
+    if not products:
+        return {"query": query, "total": 0, "products": []}
+
+    results = analyze_products_batch(products)
+    return {
+        "query": query,
+        "total": len(results),
+        "products": results,
     }
