@@ -82,11 +82,11 @@ def scrape_and_save(query: str) -> List[Dict[str, Any]]:
     ]
 
     all_products = []
-    max_products = 15
+    max_products = None
 
     # Mỗi scraper dùng BrowserManager riêng (thread-safe)
     # Giới hạn max_workers=3 để tránh quá tải RAM/CPU
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=7) as executor:
         future_map = {
             executor.submit(run_single_scraper, sc, query, max_products): sc.__name__
             for sc in scraper_classes
@@ -103,13 +103,14 @@ def scrape_and_save(query: str) -> List[Dict[str, Any]]:
 
     filtered_products = filter_comparable_phones(all_products, query)
     logger.info(
-        f"Lọc kết quả: {len(all_products)} sản phẩm thô → {len(filtered_products)} điện thoại khớp"
+        f"Lọc kết quả: {len(all_products)} sản phẩm thô → {len(filtered_products)} điện thoại khớp. "
+        f"Lưu hết {len(all_products)} sản phẩm vào DB"
     )
 
-    # Lưu vào MongoDB
-    if filtered_products:
+    # Lưu TẤT CẢ sản phẩm vào DB (không chỉ sản phẩm đã lọc)
+    if all_products:
         from utils.db import save_search_results
-        save_search_results(query, filtered_products)
+        save_search_results(query, all_products)
 
     return filtered_products
 

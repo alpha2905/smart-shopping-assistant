@@ -131,35 +131,85 @@ class HoangHaMobileScraper(BaseScraper):
         return products
 
     def extract_comments(self, page: Page, product_url: str) -> List[str]:
-        comments = []
+        all_comments_set = set()  # Dùng set để chống trùng lặp bình luận
         try:
             if not product_url:
-                return comments
+                return []
             
             if not safe_goto(page, product_url, timeout=20000):
-                return comments
+                return []
             
             page.wait_for_timeout(2000)
             
-            comment_elements = page.query_selector_all(
-                ".comment-content, .review-content, .customer-review, "
-                ".rating-content p, [class*='comment'] p, [class*='review'] p, "
-                ".product-comment p, .comment-item p, .feedback-content p, "
-                "[class*='feedback'] p, .rc-review p, .customer-comment p"
-            )
-            
-            for el in comment_elements[:10]:
+            # Cuộn xuống khu vực bình luận để kích hoạt hiển thị
+            page.evaluate("window.scrollBy(0, 1500);")
+            page.wait_for_timeout(2000)
+
+            def collect_current_page_comments():
+                comment_elements = page.locator("div.comment-text, div.comment-block div.comment-text").all()
+                for el in comment_elements:
+                    try:
+                        text = el.inner_text().strip()
+                        # Làm sạch dấu ngoặc kép thừa
+                        text = text.strip('"').strip("'").strip()
+                        if text and len(text) > 4:
+                            all_comments_set.add(text)
+                    except Exception:
+                        continue
+
+            # === BƯỚC 1: LẤY DỮ LIỆU TRANG 1 ===
+            collect_current_page_comments()
+
+            # === BƯỚC 2: XỬ LÝ PHÂN TRANG ĐỘNG (CUỐN CHIẾU) ===
+            current_page_idx = 2
+            max_detected_page = 1
+
+            # Quét tìm các số trang ban đầu xuất hiện trên thanh phân trang
+            try:
+                pagination_ol = page.locator("ol.pagination").first
+                if pagination_ol.count() > 0:
+                    lis = pagination_ol.locator("li").all()
+                    for li in lis:
+                        text = li.inner_text().strip()
+                        text_val = "".join(filter(str.isdigit, text))
+                        if text_val.isdigit():
+                            max_detected_page = max(max_detected_page, int(text_val))
+            except Exception as e:
+                logger.debug(f"Lỗi khởi tạo phân trang: {e}")
+
+            # Vòng lặp duyệt qua các trang bình luận tiếp theo
+            while current_page_idx <= max_detected_page and current_page_idx <= 5:
                 try:
-                    text = el.inner_text().strip()
-                    if text and len(text) > 10:
-                        comments.append(text)
-                except Exception:
-                    continue
-                    
+                    # Click vào số trang tiếp theo
+                    page.locator(f"ol.pagination >> li:has-text('{current_page_idx}')").first.click()
+                    page.wait_for_timeout(2500)
+                    logger.info(f"Đã click sang trang bình luận {current_page_idx}")
+
+                    # Thu thập comment của trang hiện tại
+                    collect_current_page_comments()
+
+                    # Cập nhật lại max_detected_page nếu xuất hiện các trang mới lộ ra (ví dụ từ trang 3 lộ trang 6)
+                    pagination_ol = page.locator("ol.pagination").first
+                    if pagination_ol.count() > 0:
+                        lis = pagination_ol.locator("li").all()
+                        for li in lis:
+                            text = li.inner_text().strip()
+                            text_val = "".join(filter(str.isdigit, text))
+                            if text_val.isdigit():
+                                page_num = int(text_val)
+                                if page_num > max_detected_page:
+                                    max_detected_page = page_num
+
+                except Exception as e:
+                    logger.debug(f"Không thể chuyển tới trang bình luận {current_page_idx}: {e}")
+                    break
+
+                current_page_idx += 1
+
         except Exception as e:
             logger.debug(f"Error extracting comments from {product_url}: {e}")
 
-        return comments
+        return list(all_comments_set)
 
 if __name__ == "__main__":
     import json

@@ -1,5 +1,4 @@
-import React, { useState } from 'react';
-import axios from 'axios';
+import React, { useState, useRef } from 'react';
 import PriceChart from './PriceChart';
 
 // Danh sách 7 sàn cố định
@@ -42,6 +41,7 @@ export default function SearchProduct() {
   const [error, setError] = useState(null);
   const [storeStatus, setStoreStatus] = useState({});
   const [cached, setCached] = useState(false);
+  const eventSourceRef = useRef(null);
 
   // Nhóm sản phẩm theo source
   const groupedProducts = {};
@@ -56,77 +56,129 @@ export default function SearchProduct() {
     }
   });
 
-  const handleForceRefresh = async () => {
-    if (!keyword.trim()) return;
+  // Hàm chung: gọi SSE endpoint, nhận kết quả từng sàn streaming
+  const searchWithSSE = (query, forceRefresh = false) => {
+    // Đóng EventSource cũ nếu còn đang mở
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+
     setLoading(true);
     setError(null);
     setProducts([]);
+    setCached(false);
+
+    // Set tất cả store về trạng thái "loading"
     const initialStatus = {};
     STORES.forEach(store => { initialStatus[store.key] = 'loading'; });
     setStoreStatus(initialStatus);
 
-    try {
-      const response = await axios.get(`http://localhost:8000/api/search?q=${encodeURIComponent(keyword)}&force_refresh=true`);
-      const resultProducts = response.data.products || [];
-      setProducts(resultProducts);
-      setCached(false);
-      const newStatus = {};
-      STORES.forEach(store => {
-        const hasProducts = resultProducts.some(p => SOURCE_TO_KEY[p.source] === store.key);
-        newStatus[store.key] = hasProducts ? 'done' : 'empty';
+    // Tạo EventSource đến SSE endpoint
+    const url = `http://localhost:8000/api/search/stream?q=${encodeURIComponent(query)}${forceRefresh ? '&force_refresh=true' : ''}`;
+    const eventSource = new EventSource(url);
+    eventSourceRef.current = eventSource;
+
+    // Event: cached — dữ liệu có sẵn trong DB, trả về tất cả cùng lúc
+    eventSource.addEventListener('cached', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const cachedProducts = data.products || [];
+        setProducts(cachedProducts);
+        setCached(true);
+
+        // Cập nhật trạng thái từng sàn
+        const newStatus = {};
+        STORES.forEach(store => {
+          const hasProducts = cachedProducts.some(p => SOURCE_TO_KEY[p.source] === store.key);
+          newStatus[store.key] = hasProducts ? 'done' : 'empty';
+        });
+        setStoreStatus(newStatus);
+      } catch (err) {
+        console.error("Lỗi parse cached event:", err);
+      }
+    });
+
+    // Event: store — một sàn vừa scrape xong, push products ngay lập tức
+    eventSource.addEventListener('store', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        const sourceName = data.source;
+        const storeKey = SOURCE_TO_KEY[sourceName];
+
+        if (data.products && data.products.length > 0) {
+          // Append sản phẩm mới vào danh sách (render ngay lập tức)
+          setProducts(prev => [...prev, ...data.products]);
+        }
+
+        // Cập nhật trạng thái sàn này → done hoặc empty
+        if (storeKey) {
+          setStoreStatus(prev => ({
+            ...prev,
+            [storeKey]: data.count > 0 ? 'done' : 'empty',
+          }));
+        }
+      } catch (err) {
+        console.error("Lỗi parse store event:", err);
+      }
+    });
+
+    // Event: done — tất cả sàn đã xong, backend đã lưu DB
+    eventSource.addEventListener('done', (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        setLoading(false);
+        setCached(data.cached || false);
+
+        // Đánh dấu các sàn vẫn còn "loading" là "empty" (không có dữ liệu)
+        setStoreStatus(prev => {
+          const newStatus = { ...prev };
+          Object.keys(newStatus).forEach(key => {
+            if (newStatus[key] === 'loading') {
+              newStatus[key] = 'empty';
+            }
+          });
+          return newStatus;
+        });
+      } catch (err) {
+        console.error("Lỗi parse done event:", err);
+      }
+      eventSource.close();
+      eventSourceRef.current = null;
+    });
+
+    // Event: error — lỗi từ backend
+    eventSource.addEventListener('error', (event) => {
+      console.error("SSE error:", event);
+    });
+
+    // EventSource onerror — lỗi kết nối (network, server down)
+    eventSource.onerror = () => {
+      // Chỉ báo lỗi nếu chưa nhận được event nào (đang loading)
+      setLoading(prevLoading => {
+        if (prevLoading) {
+          setError("Không thể kết nối đến máy chủ hoặc có lỗi xảy ra.");
+          const errorStatus = {};
+          STORES.forEach(store => { errorStatus[store.key] = 'error'; });
+          setStoreStatus(errorStatus);
+        }
+        return false;
       });
-      setStoreStatus(newStatus);
-    } catch (err) {
-      console.error("Lỗi force refresh:", err);
-      setError("Không thể scrape lại. Hãy thử lại.");
-    } finally {
-      setLoading(false);
-    }
+      eventSource.close();
+      eventSourceRef.current = null;
+    };
   };
 
-  const handleSearch = async (e) => {
+  const handleForceRefresh = (e) => {
+    if (e) e.preventDefault();
+    if (!keyword.trim()) return;
+    searchWithSSE(keyword, true);
+  };
+
+  const handleSearch = (e) => {
     e.preventDefault();
     if (!keyword.trim()) return;
-
-    setLoading(true);
-    setError(null);
-    
-    // Reset products và set tất cả store về trạng thái "đang tìm"
-    setProducts([]);
-    const initialStatus = {};
-    STORES.forEach(store => {
-      initialStatus[store.key] = 'loading';
-    });
-    setStoreStatus(initialStatus);
-
-    try {
-      // Gọi API đến Backend FastAPI (chạy ở cổng 8000)
-      const response = await axios.get(`http://localhost:8000/api/search?q=${encodeURIComponent(keyword)}`);
-      const resultProducts = response.data.products || [];
-      setProducts(resultProducts);
-      setCached(response.data.cached || false);
-      
-      // Cập nhật trạng thái cho từng sàn
-      const newStatus = {};
-      STORES.forEach(store => {
-        // Kiểm tra xem có sản phẩm nào từ sàn này không
-        const hasProducts = resultProducts.some(p => SOURCE_TO_KEY[p.source] === store.key);
-        newStatus[store.key] = hasProducts ? 'done' : 'empty';
-      });
-      setStoreStatus(newStatus);
-    } catch (err) {
-      console.error("Lỗi gọi API:", err);
-      setError("Không thể kết nối đến máy chủ hoặc có lỗi xảy ra.");
-      
-      // Nếu lỗi, đánh dấu tất cả là lỗi
-      const errorStatus = {};
-      STORES.forEach(store => {
-        errorStatus[store.key] = 'error';
-      });
-      setStoreStatus(errorStatus);
-    } finally {
-      setLoading(false);
-    }
+    searchWithSSE(keyword, false);
   };
 
   // Render sản phẩm trong một cột

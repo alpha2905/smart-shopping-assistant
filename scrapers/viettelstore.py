@@ -1,11 +1,11 @@
 import sys
 import os
 
-# Thêm thư mục gốc (E:\datn) vào sys.path để Python nhận diện các package như models, scrapers, utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import logging
-from typing import List
+import urllib.parse
+from typing import List, Optional
 from models.product import Product
 from scrapers.base_scraper import BaseScraper
 from utils.browser import BrowserManager, Page, safe_goto, wait_for_page_load
@@ -22,111 +22,100 @@ class ViettelStoreScraper(BaseScraper):
         self.base_url = "https://viettelstore.vn"
 
     def get_search_url(self, query: str) -> str:
-        import urllib.parse
         return f"{self.base_url}/ket-qua-tim-kiem.html?keyword={urllib.parse.quote(query)}&sort=SearchResult"
 
-    def search(self, query: str, max_products: int = 10) -> List[Product]:
+    def search(self, query: str, max_products: Optional[int] = None) -> List[Product]:
         products = []
-        page = self.browser_manager.new_page()
+        search_page = self.browser_manager.new_page()
         try:
             search_url = self.get_search_url(query)
             logger.info(f"Searching {self.site_name}: {search_url}")
             
-            if not safe_goto(page, search_url, timeout=45000):
+            if not safe_goto(search_page, search_url, timeout=45000):
                 logger.warning(f"Failed to load search page for {self.site_name}")
                 return products
 
-            # Validate page loaded correctly
-            if not self.is_search_page_valid(page):
+            if not self.is_search_page_valid(search_page):
                 logger.warning(f"[{self.site_name}] Search page appears invalid or blocked")
                 return products
 
-            # Wait for content to load and scroll for lazy loading
-            self.wait_and_scroll(page, initial_wait=3000, scroll_times=4)
+            self.wait_and_scroll(search_page, initial_wait=3000, scroll_times=4)
+            products = self.extract_product_info(search_page, query, max_products)
             
-            products = self.extract_product_info(page, query, max_products)
+            search_page.close()
+
+            logger.info(f"Bắt đầu lấy comment cho {len(products)} sản phẩm bằng Context...")
             
-            # Try to get comments for first 2 products
-            for product in products[:2]:
-                try:
-                    logger.info(f"Checking comments for: {product.name}")
-                    comments = self.extract_comments(page, product.product_url)
-                    # Nếu có bình luận thì mới gán vào sản phẩm, không có thì bỏ qua
-                    if comments:
-                        product.comments = comments
-                        logger.info(f"Found {len(comments)} comments for {product.name}")
-                    else:
-                        logger.info(f"No comments found for {product.name}, skipping.")
-                except Exception as e:
-                    logger.debug(f"Failed to get comments for {product.name}: {e}")
+            if hasattr(self.browser_manager, 'browser') and self.browser_manager.browser:
+                browser = self.browser_manager.browser
+                with browser.new_context() as context:
+                    for product in products:
+                        try:
+                            comments = self._extract_comments_viettel(context, product.product_url)
+                            if comments:
+                                product.comments = comments
+                                logger.info(f"Lấy được {len(comments)} comment cho {product.name}")
+                            else:
+                                logger.debug(f"Sản phẩm {product.name} chưa có bình luận.")
+                        except Exception as e:
+                            logger.debug(f"Failed to get comments for {product.name}: {e}")
+            else:
+                for product in products:
+                    try:
+                        comments = self.extract_comments_legacy(product.product_url) 
+                        if comments:
+                            product.comments = comments
+                    except Exception as e:
+                        logger.debug(f"Failed to get comments for {product.name}: {e}")
 
         except Exception as e:
             logger.error(f"Error scraping {self.site_name}: {e}")
-        finally:
-            page.close()
-
+        
         return products
 
-    def extract_product_info(self, page: Page, query: str, max_products: int) -> List[Product]:
+    def extract_product_info(self, page: Page, query: str, max_products: Optional[int] = None) -> List[Product]:
         products = []
         try:
-            # Thử nhiều selector khác nhau cho Viettel Store
             product_elements = []
-            for sel in [
-                "div.product-item", "div.product-info-container",
-                "div[class*='product']", "div[class*='item']",
-                "li[class*='product']", "div.box-product",
-                "div.cat-product", "div.prd-item",
-                ".item", "li.item",
-            ]:
+            for sel in ["div.product-item", "div.product-info-container", "div[class*='product']", ".item"]:
                 product_elements = page.query_selector_all(sel)
                 if product_elements:
-                    logger.info(f"[{self.site_name}] Found elements with selector '{sel}': {len(product_elements)}")
                     break
 
             logger.info(f"Found {len(product_elements)} product elements on {self.site_name}")
 
-            for element in product_elements[:max_products]:
+            elements_to_process = product_elements if max_products is None else product_elements[:max_products]
+
+            for element in elements_to_process:
                 try:
-                    # Thẻ a chính chứa thông tin data-name, data-price
                     link_el = element.query_selector("a[data-name]") or element.query_selector("a")
                     
-                    # 1. Lấy tên sản phẩm từ attribute data-name hoặc thẻ chứa tên
                     name = ""
                     if link_el:
                         name = link_el.get_attribute("data-name") or ""
-                    
                     if not name:
-                        name_el = element.query_selector("h3, .name, .product-name, [class*='name']")
+                        name_el = element.query_selector("h3, .name, .product-name")
                         if name_el:
                             name = name_el.inner_text().strip()
 
-                    # 2. Lấy giá sản phẩm từ data-price hoặc class price
                     price = "Liên hệ"
                     if link_el and link_el.get_attribute("data-price"):
                         raw_price = link_el.get_attribute("data-price")
                         try:
-                            # Xử lý format giá kiểu Viettel Store (vd: 1.199E+07 hoặc số thông thường)
                             price = f"{int(float(raw_price)):,} đ".replace(",", ".")
                         except Exception:
                             price = raw_price
-
                     if price == "Liên hệ":
-                        price_el = element.query_selector(".price, .product-price, [class*='price']")
+                        price_el = element.query_selector(".price, .product-price")
                         if price_el:
                             price = price_el.inner_text().strip()
 
-                    # 3. Lấy hình ảnh từ img.product__img
+                    # Cập nhật ưu tiên lấy src trước từ thẻ img.product__img theo cấu trúc HTML thực tế
                     img_el = element.query_selector("img.product__img, img")
                     image_url = ""
                     if img_el:
-                        image_url = (
-                            img_el.get_attribute("data-src") or 
-                            img_el.get_attribute("src") or 
-                            img_el.get_attribute("data-lazy") or ""
-                        )
+                        image_url = img_el.get_attribute("src") or img_el.get_attribute("data-src") or ""
 
-                    # 4. Lấy đường dẫn sản phẩm (URL)
                     product_url = ""
                     if link_el:
                         href = link_el.get_attribute("href") or ""
@@ -135,8 +124,20 @@ class ViettelStoreScraper(BaseScraper):
                         elif href.startswith("http"):
                             product_url = href
 
-                    # Chỉ giữ sản phẩm là điện thoại
-                    if not self._is_phone_product(name, product_url):
+                    # Logic lọc điện thoại chính xác
+                    is_phone = False
+                    if product_url:
+                        if "/dien-thoai/" in product_url:
+                            is_phone = True
+                        elif name:
+                            name_lower = name.lower()
+                            phone_keywords = ['iphone', 'samsung', 'oppo', 'xiaomi', 'vivo', 'realme', 'nokia', 'masstel', 'itel', 'mobiistar']
+                            bad_keywords = ['laptop', 'mtxt', 'máy tính', 'tai nghe', 'sạc', 'cáp', 'ốp lưng', 'bao da', 'tấm dán', 'pin dự phòng']
+                            
+                            if any(kw in name_lower for kw in phone_keywords) and not any(bad in name_lower for bad in bad_keywords):
+                                is_phone = True
+                    
+                    if not is_phone:
                         logger.debug(f"Bỏ qua sản phẩm không phải điện thoại: {name[:50]}")
                         continue
 
@@ -149,48 +150,82 @@ class ViettelStoreScraper(BaseScraper):
                             source=self.site_name
                         ))
                 except Exception as e:
-                    logger.debug(f"Error extracting product element: {e}")
+                    logger.debug(f"Error extracting product: {e}")
                     continue
 
         except Exception as e:
-            logger.warning(f"Error in extract_product_info for {self.site_name}: {e}")
-
+            logger.warning(f"Error in extract_product_info: {e}")
         return products
 
-    def extract_comments(self, page: Page, product_url: str) -> List[str]:
-        comments = []
+    def _extract_comments_viettel(self, context, product_url: str) -> List[str]:
+        page = context.new_page() 
         try:
             if not product_url:
-                return comments
+                return []
+
+            page.on("popup", lambda popup: popup.close())
 
             if not safe_goto(page, product_url, timeout=20000):
-                return comments
+                return []
 
-            # Cuộn xuống dưới một chút để trigger lazy load phần bình luận nếu có
-            page.evaluate("window.scrollBy(0, 800)")
+            page.wait_for_timeout(3000)
+            page.evaluate("window.scrollBy(0, 1200);")
             page.wait_for_timeout(2000)
 
-            # Lấy các thẻ chứa nội dung bình luận theo cấu trúc mới phát hiện
-            comment_elements = page.query_selector_all(".cmt-item div.c, #div_cmt_lst div.c")
-
-            for el in comment_elements[:10]:
+            max_clicks = 10
+            for _ in range(max_clicks):
                 try:
-                    text = el.inner_text().strip()
-                    if text and len(text) > 5:
-                        comments.append(text)
+                    current_items = page.locator("div.cmt-item-content div.q-r").count()
+                    load_more_btn = page.locator("div.cmt_loadmore a.btnAdDCmt, div.cmt_loadmore a").first
+                    
+                    if load_more_btn.count() == 0 or not load_more_btn.is_visible():
+                        break
+
+                    logger.info(f"Đang bấm 'Xem thêm'... (Hiện có {current_items} câu hỏi)")
+                    load_more_btn.click(force=True)
+
+                    try:
+                        page.wait_for_function(
+                            f"() => document.querySelectorAll('div.cmt-item-content div.q-r').length > {current_items}",
+                            timeout=4000
+                        )
+                        logger.info("Đã load thêm câu hỏi mới!")
+                    except Exception:
+                        logger.info("Không còn câu hỏi mới để load.")
+                        break 
+
+                except Exception as e:
+                    logger.debug(f"Lỗi vòng lặp xem thêm: {e}")
+                    break
+
+            comments = []
+            qr_elements = page.locator("div.cmt-item-content div.q-r").all()
+            
+            for qr_el in qr_elements:
+                try:
+                    user_question_el = qr_el.locator("div.c").first
+                    if user_question_el.count() > 0:
+                        text = user_question_el.inner_text().strip()
+                        text = text.strip('"').strip("'").strip()
+                        if text and len(text) > 4:
+                            comments.append(text)
                 except Exception:
                     continue
 
         except Exception as e:
-            logger.debug(f"Error extracting comments from {product_url}: {e}")
+            logger.debug(f"Error extracting comments: {e}")
+            return []
+        finally:
+            page.close()
 
         return comments
+    
+    def extract_comments_legacy(self, product_url: str) -> List[str]:
+        return []
+
 
 if __name__ == "__main__":
-    import sys
     import json
-    import os
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -198,35 +233,33 @@ if __name__ == "__main__":
     )
 
     print("=== BẮT ĐẦU TEST VIETTEL STORE SCRAPER ===")
-    
-    # Sử dụng 'with' để kích hoạt BrowserManager
     with BrowserManager(headless=False) as browser_manager:
         try:
             scraper = ViettelStoreScraper(browser_manager=browser_manager)
-            
             query_keyword = input("Nhập từ khóa tìm kiếm (ví dụ: Oppo, iPhone): ").strip()
-            max_results = 3
             
+            max_results = None
             print(f"Đang tìm kiếm: '{query_keyword}'...")
+            
             products = scraper.search(query=query_keyword, max_products=max_results)
 
             print(f"\nKết quả tìm thấy: {len(products)} sản phẩm\n" + "-" * 50)
             
             products_data = []
             for idx, prod in enumerate(products, 1):
-                print(f"[{idx}] Tên: {prod.name} - Giá: {prod.price}")
-                
+                print(f"[{idx}] Tên: {prod.name} - Giá: {prod.price} - Comments: {len(prod.comments)}")
+                if len(prod.comments) > 0:
+                    print(f"   -> Comment mẫu: {prod.comments[0][:50]}...")
                 prod_dict = {
                     "name": prod.name,
                     "price": prod.price,
                     "product_url": prod.product_url,
                     "image_url": prod.image_url,
                     "source": prod.source,
-                    "comments": getattr(prod, "comments", [])
+                    "comments": prod.comments
                 }
                 products_data.append(prod_dict)
 
-            # Xuất kết quả ra file JSON
             output_file = "viettelstore_results.json"
             with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(products_data, f, ensure_ascii=False, indent=4)

@@ -1,9 +1,13 @@
 import sys
 import os
+import json
+import logging
+from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import logging
-from typing import List
+from typing import List, Optional
 from models.product import Product
 from scrapers.base_scraper import BaseScraper
 from utils.browser import BrowserManager, Page, safe_goto, wait_for_page_load
@@ -59,12 +63,6 @@ class CellphoneSScraper(BaseScraper):
     def _extract_from_element(self, element) -> dict:
         """Extract product info from a single element using multiple strategies."""
         result = {"name": "", "price": "Liên hệ", "image_url": "", "product_url": ""}
-
-        # Get the HTML for debugging
-        try:
-            html = element.inner_html()
-        except Exception:
-            html = ""
 
         # ---- NAME ----
         for sel in ["h3 a", "h3", "a.product__link", "a[title]", "a[href]", "div.product__name", 
@@ -122,7 +120,6 @@ class CellphoneSScraper(BaseScraper):
     def extract_product_info(self, page: Page, query: str, max_products: int) -> List[Product]:
         products = []
         try:
-            # Multiple outer container selectors
             product_elements = []
             for sel in [
                 "div.product-info-container",
@@ -140,7 +137,6 @@ class CellphoneSScraper(BaseScraper):
                     break
 
             if not product_elements:
-                # Last resort: look for any container with product links
                 product_elements = page.query_selector_all("a[href*='/product'], a[href*='/mobile'], a[href*='/dtdd']")
 
             logger.info(f"Found {len(product_elements)} product elements on {self.site_name}")
@@ -154,7 +150,6 @@ class CellphoneSScraper(BaseScraper):
                         continue
 
                     if info["name"] and info["product_url"]:
-                        # Normalize URL
                         href = info["product_url"]
                         if href.startswith("/"):
                             href = self.base_url + href
@@ -179,7 +174,167 @@ class CellphoneSScraper(BaseScraper):
 
         return products
 
+    # ─── CRAWL ALL PHONES FROM /mobile.html ────────────────────────────────
+
+    def crawl_all_phones(self, max_products: Optional[int] = None) -> List[Product]:
+        """
+        Cào TẤT CẢ sản phẩm điện thoại từ https://cellphones.com.vn/mobile.html.
+        Click "Xem thêm" để load hết sản phẩm, sau đó extract từng sản phẩm.
+        """
+        products = []
+        page = self.browser_manager.new_page()
+        try:
+            url = f"{self.base_url}/mobile.html"
+            logger.info(f"Crawling ALL phones from {self.site_name}: {url}")
+
+            if not safe_goto(page, url, timeout=60000, wait_until="domcontentloaded"):
+                logger.warning(f"Failed to load /mobile.html page for {self.site_name}")
+                return products
+
+            page.wait_for_timeout(3000)
+
+            # Click "Xem thêm" để load thêm sản phẩm
+            max_click_rounds = 50
+            for round_idx in range(max_click_rounds):
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                    page.wait_for_timeout(1500)
+
+                    btn_xem_them = page.locator(
+                        "a.button__show-more-product, "
+                        "a.btn-show-more, "
+                        "a.button.btn-show-more, "
+                        "button[class*='show-more'], "
+                        "a:has-text('Xem thêm'), "
+                        "a:has-text('Xem them'), "
+                        "button:has-text('Xem thêm'), "
+                        "button:has-text('Xem them')"
+                    )
+
+                    if btn_xem_them.count() > 0 and btn_xem_them.first.is_visible():
+                        logger.info(f"[{self.site_name}] Click 'Xem thêm' lần {round_idx + 1}")
+                        btn_xem_them.first.click()
+                        page.wait_for_timeout(2000)
+                    else:
+                        logger.info(f"[{self.site_name}] Đã load hết sản phẩm sau {round_idx} vòng click")
+                        break
+                except Exception as e:
+                    logger.debug(f"[{self.site_name}] Lỗi vòng click Xem thêm: {e}")
+                    break
+
+            # Cuộn lên đầu trang
+            page.evaluate("window.scrollTo(0, 0);")
+            page.wait_for_timeout(1000)
+
+            # Lấy tất cả product containers
+            product_containers = page.query_selector_all("div.product-info-container.product-item")
+            logger.info(f"[{self.site_name}] Tìm thấy {len(product_containers)} product containers")
+
+            if not product_containers:
+                product_containers = page.query_selector_all("div.product-info-container")
+                logger.info(f"[{self.site_name}] Fallback: tìm thấy {len(product_containers)} product-info-container")
+
+            if not product_containers:
+                product_list = page.query_selector("div.product-list-filter")
+                if product_list:
+                    product_containers = product_list.query_selector_all("div.product-info-container")
+                    logger.info(f"[{self.site_name}] Fallback 2: tìm thấy {len(product_containers)} containers trong product-list-filter")
+
+            limit = max_products if max_products else len(product_containers)
+            logger.info(f"[{self.site_name}] Bắt đầu extract {min(limit, len(product_containers))} sản phẩm")
+
+            for container in product_containers[:limit]:
+                try:
+                    product = self._extract_single_product(container)
+                    if product:
+                        products.append(product)
+                except Exception as e:
+                    logger.debug(f"Error extracting product: {e}")
+                    continue
+
+            logger.info(f"[{self.site_name}] Đã cào được {len(products)} sản phẩm từ /mobile.html")
+
+        except Exception as e:
+            logger.error(f"Error crawling all phones from {self.site_name}: {e}", exc_info=True)
+        finally:
+            page.close()
+
+        return products
+
+    def _extract_single_product(self, container) -> Optional[Product]:
+        """
+        Trích xuất thông tin 1 sản phẩm từ container div.product-info-container.
+        """
+        try:
+            link_el = container.query_selector("a.product__link")
+            if not link_el:
+                link_el = container.query_selector("a[href*='/dien-thoai-'], a[href*='/mobile'], a[href*='/iphone-'], a[href]")
+
+            name = ""
+            if link_el:
+                img_inside = link_el.query_selector("img")
+                if img_inside:
+                    name = img_inside.get_attribute("alt") or ""
+
+            if not name:
+                name_el = container.query_selector("div.product__name h3, h3")
+                if name_el:
+                    name = name_el.inner_text().strip()
+
+            if not name and link_el:
+                name = link_el.get_attribute("title") or ""
+
+            # Giá
+            price = "Liên hệ"
+            price_el = container.query_selector("p.product__price--show")
+            if price_el:
+                price_text = price_el.inner_text().strip()
+                if price_text and any(c.isdigit() for c in price_text):
+                    price = price_text
+
+            # Hình ảnh
+            img_el = container.query_selector("img.product__img, img")
+            image_url = ""
+            if img_el:
+                image_url = (
+                    img_el.get_attribute("data-src") or
+                    img_el.get_attribute("src") or
+                    ""
+                )
+
+            # Link
+            product_url = ""
+            if link_el:
+                href = link_el.get_attribute("href") or ""
+                if href.startswith("/"):
+                    product_url = self.base_url + href
+                elif href.startswith("http"):
+                    product_url = href
+
+            if name and product_url:
+                return Product(
+                    name=name.strip(),
+                    price=price.strip(),
+                    image_url=image_url.strip(),
+                    product_url=product_url.strip(),
+                    source=self.site_name
+                )
+        except Exception as e:
+            logger.debug(f"Error extracting single product: {e}")
+
+        return None
+
+    # ─── EXTRACT COMMENTS (single product) ────────────────────────────────
+
     def extract_comments(self, page: Page, product_url: str) -> List[str]:
+        """
+        Extract comments/reviews from a CellphoneS product page.
+        Dựa trên cấu trúc HTML thực tế:
+        - Container: div.boxReview-comment-item
+        - Name: div.block-info__name span.name
+        - Comment: div.comment-content p
+        - "Xem tất cả đánh giá": a.button__view-more-review (has-text-centered is-flex ...)
+        """
         comments = []
         try:
             if not product_url:
@@ -190,26 +345,135 @@ class CellphoneSScraper(BaseScraper):
 
             page.wait_for_timeout(2000)
 
-            comment_selectors = [
-                ".comment-content", ".review-content", ".customer-review",
-                ".rating-content p", "[class*='comment'] p", "[class*='review'] p",
-                ".product-comment p", ".comment-item p", ".feedback-content p",
-                "[class*='feedback'] p", ".rc-review p", ".customer-comment p"
-            ]
-            comment_elements = page.query_selector_all(", ".join(comment_selectors))
+            # Cuộn xuống khu vực đánh giá
+            for _ in range(5):
+                page.evaluate("window.scrollBy(0, 600);")
+                page.wait_for_timeout(800)
 
-            for el in comment_elements[:10]:
+            # Click "Xem tất cả đánh giá" nếu có
+            max_click_attempts = 5
+            for i in range(max_click_attempts):
                 try:
-                    text = el.inner_text().strip()
-                    if text and len(text) > 10:
-                        comments.append(text)
+                    btn_view_more = page.locator(
+                        "a.button__view-more-review, "
+                        "a.has-text-centered.button__view-more-review, "
+                        "a:has-text('Xem tất cả đánh giá'), "
+                        "a:has-text('Xem tat ca danh gia'), "
+                        "button:has-text('Xem tất cả'), "
+                        "a.load-more"
+                    )
+                    if btn_view_more.count() > 0 and btn_view_more.first.is_visible():
+                        logger.info("Tìm thấy nút 'Xem tất cả đánh giá', đang click...")
+                        btn_view_more.first.click()
+                        page.wait_for_timeout(2000)
+                        for _ in range(3):
+                            page.evaluate("window.scrollBy(0, 400);")
+                            page.wait_for_timeout(500)
+                    else:
+                        break
+                except Exception as e:
+                    logger.debug(f"Lỗi khi click nút xem thêm đánh giá: {e}")
+                    break
+
+            # Lấy danh sách comment
+            comment_items = page.locator("div.boxReview-comment-item").all()
+            logger.info(f"Tìm thấy {len(comment_items)} comment items")
+
+            for item in comment_items:
+                try:
+                    name_el = item.locator("div.block-info__name span.name")
+                    reviewer_name = ""
+                    if name_el.count() > 0:
+                        reviewer_name = name_el.first.inner_text().strip()
+
+                    comment_el = item.locator("div.comment-content p")
+                    if comment_el.count() > 0:
+                        text = comment_el.first.inner_text().strip()
+                        if text and len(text) > 3:
+                            comment_text = f"{reviewer_name}: {text}" if reviewer_name else text
+                            if comment_text not in comments:
+                                comments.append(comment_text)
                 except Exception:
                     continue
+
+            logger.info(f"Đã lấy được {len(comments)} comments từ {product_url[:50]}...")
 
         except Exception as e:
             logger.debug(f"Error extracting comments from {product_url}: {e}")
 
         return comments
+
+    # ─── EXTRACT ALL COMMENTS MULTI-THREADED ──────────────────────────────
+
+    def extract_all_comments_multithreaded(
+        self, products: List[Product], max_workers: int = 5, max_comments: int = 300
+    ) -> List[dict]:
+        """
+        Cào comment cho tất cả sản phẩm bằng multi-threading.
+        Mỗi thread dùng BrowserManager riêng (Playwright thread-safe).
+        
+        Args:
+            products: List of Product objects to fetch comments for
+            max_workers: Số thread tối đa (mặc định 5)
+            max_comments: Giới hạn comment tối đa mỗi sản phẩm
+            
+        Returns:
+            List[dict] với keys: name, price, image_url, product_url, source, comments
+        """
+        products_data = []
+        product_dicts = []
+        for p in products:
+            product_dicts.append({
+                "name": p.name,
+                "price": p.price,
+                "image_url": p.image_url,
+                "product_url": p.product_url,
+                "source": p.source,
+                "comments": [],
+            })
+
+        def _fetch_comments_for_product(prod_dict: dict) -> dict:
+            """Hàm chạy trong thread riêng để cào comment cho 1 sản phẩm."""
+            try:
+                with BrowserManager(headless=True) as bm:
+                    page = bm.new_page()
+                    product_url = prod_dict["product_url"]
+                    comments = self.extract_comments(page, product_url)
+                    page.close()
+                    prod_dict["comments"] = comments[:max_comments]
+                    logger.info(
+                        f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"  [Thread] Lỗi cào comment {prod_dict['name'][:40]}: {e}"
+                )
+                prod_dict["comments"] = []
+            return prod_dict
+
+        logger.info(
+            f"Bắt đầu cào comment multi-threaded ({max_workers} workers) cho "
+            f"{len(product_dicts)} sản phẩm..."
+        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(_fetch_comments_for_product, p)
+                for p in product_dicts
+            ]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        products_data.append(result)
+                except Exception as e:
+                    logger.error(f"Lỗi thread cào comment: {e}")
+
+        logger.info(
+            f"Đã hoàn thành cào comment cho {len(products_data)} sản phẩm "
+            f"(multi-threaded)"
+        )
+        return products_data
 
 
 if __name__ == "__main__":
@@ -231,27 +495,19 @@ if __name__ == "__main__":
         try:
             scraper = CellphoneSScraper(browser_manager=browser_manager)
 
-            query_keyword = input("Nhập từ khóa tìm kiếm (ví dụ: iPhone, Samsung): ").strip()
-            max_results = 3
-
-            print(f"Đang tìm kiếm: '{query_keyword}'...")
-            products = scraper.search(query=query_keyword, max_products=max_results)
+            print("Đang crawl tất cả sản phẩm từ /mobile.html...")
+            products = scraper.crawl_all_phones(max_products=10)
 
             print(f"\nKết quả tìm thấy: {len(products)} sản phẩm\n" + "-" * 50)
 
-            products_data = []
-            for idx, prod in enumerate(products, 1):
-                print(f"[{idx}] Tên: {prod.name} - Giá: {prod.price}")
+            # Cào comment multi-threaded
+            print("\nĐang cào comment multi-threaded...")
+            products_data = scraper.extract_all_comments_multithreaded(
+                products, max_workers=5, max_comments=300
+            )
 
-                prod_dict = {
-                    "name": prod.name,
-                    "price": prod.price,
-                    "product_url": prod.product_url,
-                    "image_url": prod.image_url,
-                    "source": prod.source,
-                    "comments": getattr(prod, "comments", [])
-                }
-                products_data.append(prod_dict)
+            for idx, prod in enumerate(products_data, 1):
+                print(f"[{idx}] Tên: {prod['name']} - Giá: {prod['price']} - Comments: {len(prod['comments'])}")
 
             output_file = "cellphones_results.json"
             with open(output_file, "w", encoding="utf-8") as f:

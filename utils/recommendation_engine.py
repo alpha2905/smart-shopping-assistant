@@ -429,6 +429,10 @@ def analyze_product(
     product_url = product.get("product_url", "")
     source = product.get("source", "")
 
+    # Nếu không truyền comments, lấy từ product data (đã lưu trong DB)
+    if comments is None:
+        comments = product.get("comments", [])
+
     # 1. Tính PQS
     pqs_result = calculate_pqs(product, comments, sentiment_score)
 
@@ -455,11 +459,13 @@ def analyze_products_batch(
 ) -> List[Dict[str, Any]]:
     """
     Phân tích hàng loạt sản phẩm, trả về danh sách đã sắp xếp theo PQS.
+    Truyền comments từ product data (đã lưu trong DB) vào analyze_product.
     """
     results = []
     for product in products:
         try:
-            analysis = analyze_product(product)
+            comments = product.get("comments", [])
+            analysis = analyze_product(product, comments=comments)
             results.append(analysis)
         except Exception as e:
             logger.error(f"Error analyzing product {product.get('name', '')}: {e}")
