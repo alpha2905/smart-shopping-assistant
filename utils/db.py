@@ -10,6 +10,7 @@ import os
 import logging
 from datetime import datetime
 from typing import List, Dict, Any, Optional
+from collections import defaultdict
 
 from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING, DESCENDING
@@ -169,39 +170,48 @@ def get_product_comments(product_url: str, source: str) -> List[str]:
 
 def get_all_product_urls_by_source() -> Dict[str, List[str]]:
     """
-    Lấy tất cả các URL sản phẩm duy nhất từ collection 'products',
+    Lấy tất cả các URL sản phẩm duy nhất từ TẤT CẢ các collection,
     nhóm chúng theo 'source'.
     Hàm này dùng để phục vụ việc cập nhật giá hàng loạt.
     """
-    logger.info("Đang truy vấn tất cả URL sản phẩm duy nhất từ DB...")
+    logger.info("Đang truy vấn tất cả URL sản phẩm duy nhất từ TẤT CẢ các collection trong DB...")
+    db = get_db()
+    
+    collection_names = [
+        "products", "tgdd", "fpt", "cellphones", "viettelstore",
+        "hoangha", "didongviet", "clickbuy", "mobilecity"
+    ]
+
+    urls_by_source = defaultdict(set)
+
     pipeline = [
         {
-            # Chỉ lấy các document có product_url và source hợp lệ
             "$match": {
                 "product_url": {"$exists": True, "$ne": ""},
                 "source": {"$exists": True, "$ne": ""}
             }
         },
         {
-            # Nhóm theo source và tạo một set các URL để đảm bảo tính duy nhất
             "$group": {
                 "_id": "$source",
                 "urls": {"$addToSet": "$product_url"}
             }
-        },
-        {
-            # Sắp xếp theo tên source
-            "$sort": {
-                "_id": 1
-            }
         }
     ]
-    results = get_collection().aggregate(pipeline)
-    
-    urls_by_source = {item['_id']: item['urls'] for item in results}
-    total_urls = sum(len(urls) for urls in urls_by_source.values())
-    logger.info(f"Đã tìm thấy {total_urls} URL từ {len(urls_by_source)} sàn trong DB để cập nhật giá.")
-    return urls_by_source
+
+    for name in collection_names:
+        try:
+            if name in db.list_collection_names():
+                for item in db[name].aggregate(pipeline):
+                    if item.get('_id') and item.get('urls'):
+                        urls_by_source[item['_id']].update(item['urls'])
+        except Exception as e:
+            logger.warning(f"Could not get URLs from collection '{name}': {e}")
+
+    final_urls_by_source = {source: sorted(list(url_set)) for source, url_set in urls_by_source.items()}
+    total_urls = sum(len(urls) for urls in final_urls_by_source.values())
+    logger.info(f"Đã tìm thấy {total_urls} URL từ {len(final_urls_by_source)} sàn trong DB để cập nhật giá.")
+    return final_urls_by_source
 
 def get_all_products() -> List[Dict[str, Any]]:
     """Return latest snapshot of all tracked products with their current price and comments."""
