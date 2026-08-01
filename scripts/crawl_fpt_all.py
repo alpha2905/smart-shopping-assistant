@@ -40,7 +40,6 @@ def main():
     init_fpt_collection()
     logger.info("=== BAT DAU CRAWL TAT CA SAN PHAM + COMMENT FPT SHOP /dien-thoai ===")
 
-    products_data = []
     try:
         with BrowserManager(headless=True) as browser_manager:
             scraper = FPTShopScraper(browser_manager)
@@ -48,19 +47,14 @@ def main():
 
             # 1. Crawl tất cả sản phẩm (chỉ thông tin cơ bản)
             products = scraper.crawl_all_phones()
-            logger.info(f"Da crawl xong: {len(products)} san pham")
+            logger.info(f"Da crawl xong: {len(products)} san pham.")
 
-        # 2. Cào comment MULTI-THREADED (mỗi thread dùng BrowserManager riêng)
-        if products:
-            logger.info(f"Bắt đầu cào comment MULTI-THREADED cho {len(products)} sản phẩm (max_workers=4)...")
-            # The scraper instance for this doesn't need a pre-set browser manager
-            comment_scraper = FPTShopScraper(None)
-            products_data = comment_scraper.extract_all_comments_multithreaded(
-                products, max_workers=4, max_comments=300
-            )
-            logger.info(f"Hoan thanh crawl: {len(products_data)} san pham + comments")
-        else:
-            logger.warning("Không có sản phẩm nào để cào comment.")
+            # 2. Cào comment MULTI-THREADED (dùng chung browser manager)
+            if products:
+                logger.info(f"Bắt đầu cào comment MULTI-THREADED cho {len(products)} sản phẩm (max_workers=4)...")
+                products_data = scraper.extract_all_comments_multithreaded(products, max_workers=4)
+            else:
+                products_data = []
 
     except Exception as e:
         logger.error(f"Loi khi crawl: {e}", exc_info=True)

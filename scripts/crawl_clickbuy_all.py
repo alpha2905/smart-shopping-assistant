@@ -38,19 +38,16 @@ def main():
     init_clickbuy_collection()
     logger.info("Đã khởi tạo collection 'clickbuy'")
 
-    # Step 1: Crawl all product listings (single-threaded)
-    with BrowserManager(headless=True) as bm:
-        scraper = ClickbuyScraper(bm)
+    with BrowserManager(headless=True) as browser_manager:
+        scraper = ClickbuyScraper(browser_manager)
+        
+        # Step 1: Crawl all product listings
         logger.info("Bắt đầu crawl tất cả sản phẩm từ Clickbuy...")
         products = scraper.crawl_all_phones()
         logger.info(f"Đã crawl được {len(products)} sản phẩm")
 
-    # Step 2: Crawl comments in parallel (multi-threaded)
-    if products:
-        comment_scraper = ClickbuyScraper(None)
-        all_products_data = comment_scraper.extract_all_comments_multithreaded(
-            products, max_workers=5, max_comments=300
-        )
+        # Step 2: Crawl comments in parallel
+        all_products_data = scraper.extract_all_comments_multithreaded(products, max_workers=5)
 
         # Step 3: Save to MongoDB
         if all_products_data:

@@ -41,21 +41,19 @@ def main():
     logger.info("=== BAT DAU CRAWL TAT CA SAN PHAM + COMMENT TGDD /dtdd ===")
 
     try:
-        # Step 1: Crawl all product listings (single-threaded)
         with BrowserManager(headless=True) as browser_manager:
             scraper = TheGioiDiDongScraper(browser_manager)
             logger.info("Dang crawl tat ca san pham tu https://www.thegioididong.com/dtdd ...")
+            
+            # Step 1: Crawl all product listings
             products = scraper.crawl_all_dtdd()
             logger.info(f"Da crawl xong: {len(products)} san pham")
 
-        # Step 2: Crawl comments in parallel (multi-threaded)
-        if products:
-            comment_scraper = TheGioiDiDongScraper(None)
-            products_data = comment_scraper.extract_all_comments_multithreaded(
-                products, max_workers=4, max_comments=300
-            )
-        else:
-            products_data = []
+            # Step 2: Crawl comments in parallel (multi-threaded)
+            if products:
+                products_data = scraper.extract_all_comments_multithreaded(products, max_workers=4)
+            else:
+                products_data = []
 
     except Exception as e:
         logger.error(f"Loi khi crawl: {e}", exc_info=True)

@@ -403,16 +403,16 @@ class TheGioiDiDongScraper(BaseScraper):
 
         def _fetch_comments_for_product(prod_dict: dict) -> dict:
             """Hàm chạy trong thread riêng để cào comment cho 1 sản phẩm."""
+            page = self.browser_manager.new_page()
             try:
-                with BrowserManager(headless=True) as bm:
-                    page = bm.new_page()
-                    comments = self.extract_comments(page, prod_dict["product_url"])
-                    page.close()
-                    prod_dict["comments"] = comments[:max_comments]
-                    logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
+                comments = self.extract_comments(page, prod_dict["product_url"])
+                prod_dict["comments"] = comments[:max_comments]
+                logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
             except Exception as e:
                 logger.warning(f"  [Thread] Lỗi cào comment {prod_dict['name'][:40]}: {e}")
                 prod_dict["comments"] = []
+            finally:
+                page.close()
             return prod_dict
 
         logger.info(f"Bắt đầu cào comment multi-threaded ({max_workers} workers) cho {len(product_dicts)} sản phẩm...")

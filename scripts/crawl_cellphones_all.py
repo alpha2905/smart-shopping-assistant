@@ -37,20 +37,18 @@ def main():
     init_cellphones_collection()
     logger.info("Đã khởi tạo collection 'cellphones'")
 
-    # Bước 1: Crawl tất cả sản phẩm (single-threaded, dùng BrowserManager)
-    with BrowserManager(headless=True) as bm:
-        scraper = CellphoneSScraper(bm)
+    all_products_data = []
+    with BrowserManager(headless=True) as browser_manager:
+        scraper = CellphoneSScraper(browser_manager)
+        
+        # Bước 1: Crawl tất cả sản phẩm
         logger.info("Bắt đầu crawl tất cả sản phẩm từ CellphoneS /mobile.html...")
         products = scraper.crawl_all_phones()
         logger.info(f"Đã crawl được {len(products)} sản phẩm")
 
-    # Bước 2: Cào comment MULTI-THREADED (mỗi thread dùng BrowserManager riêng)
-    logger.info(f"Bắt đầu cào comment MULTI-THREADED cho {len(products)} sản phẩm (max_workers=5)...")
-    all_products_data = scraper.extract_all_comments_multithreaded(
-        products, max_workers=5, max_comments=300
-    )
+        # Bước 2: Cào comment MULTI-THREADED
+        all_products_data = scraper.extract_all_comments_multithreaded(products, max_workers=5)
 
-    # Bước 3: Lưu vào MongoDB
     if all_products_data:
         saved = save_cellphones_products(all_products_data)
         logger.info(f"Đã lưu {saved} sản phẩm vào collection 'cellphones'")

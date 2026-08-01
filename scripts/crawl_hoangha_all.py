@@ -38,26 +38,23 @@ def main():
     init_hoangha_collection()
     logger.info("Đã khởi tạo collection 'hoangha'")
 
-    # Step 1: Crawl all product listings (single-threaded)
-    with BrowserManager(headless=True) as bm:
-        scraper = HoangHaMobileScraper(bm)
+    with BrowserManager(headless=True) as browser_manager:
+        scraper = HoangHaMobileScraper(browser_manager)
+        
+        # Step 1: Crawl all product listings
         logger.info("Bắt đầu crawl tất cả sản phẩm từ Hoàng Hà Mobile...")
         products = scraper.crawl_all_phones()
         logger.info(f"Đã crawl được {len(products)} sản phẩm")
 
-    # Step 2: Crawl comments in parallel (multi-threaded)
-    # The scraper instance for this doesn't need a pre-set browser manager
-    comment_scraper = HoangHaMobileScraper(None)
-    all_products_data = comment_scraper.extract_all_comments_multithreaded(
-        products, max_workers=4, max_comments=300
-    )
+        # Step 2: Crawl comments in parallel
+        all_products_data = scraper.extract_all_comments_multithreaded(products, max_workers=4)
 
-    # Step 3: Save to MongoDB
-    if all_products_data:
-        saved = save_hoangha_products(all_products_data)
-        logger.info(f"Đã lưu {saved} sản phẩm vào collection 'hoangha'")
-    else:
-        logger.warning("Không có sản phẩm nào để lưu")
+        # Step 3: Save to MongoDB
+        if all_products_data:
+            saved = save_hoangha_products(all_products_data)
+            logger.info(f"Đã lưu {saved} sản phẩm vào collection 'hoangha'")
+        else:
+            logger.warning("Không có sản phẩm nào để lưu")
 
 if __name__ == "__main__":
     main()

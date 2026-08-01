@@ -38,19 +38,16 @@ def main():
     init_mobilecity_collection()
     logger.info("Đã khởi tạo collection 'mobilecity'")
 
-    # Scraper không cần browser manager ban đầu vì các method con tự quản lý
-    scraper = MobileCityScraper(None)
-    
-    # Step 1: Crawl all product listings (multi-threaded page scraping)
-    logger.info("Bắt đầu crawl tất cả sản phẩm từ MobileCity...")
-    products = scraper.crawl_all_phones()
-    logger.info(f"Đã crawl được {len(products)} sản phẩm")
+    with BrowserManager(headless=True) as browser_manager:
+        scraper = MobileCityScraper(browser_manager)
+        
+        # Step 1: Crawl all product listings
+        logger.info("Bắt đầu crawl tất cả sản phẩm từ MobileCity...")
+        products = scraper.crawl_all_phones()
+        logger.info(f"Đã crawl được {len(products)} sản phẩm")
 
-    # Step 2: Crawl comments in parallel (multi-threaded comment scraping)
-    if products:
-        all_products_data = scraper.extract_all_comments_multithreaded(
-            products, max_workers=4, max_comments=300
-        )
+        # Step 2: Crawl comments in parallel
+        all_products_data = scraper.extract_all_comments_multithreaded(products, max_workers=4)
 
         # Step 3: Save to MongoDB
         if all_products_data:

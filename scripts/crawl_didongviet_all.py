@@ -38,23 +38,21 @@ def main():
     init_didongviet_collection()
     logger.info("Đã khởi tạo collection 'didongviet'")
 
-    # Step 1: Crawl all product listings (single-threaded)
-    with BrowserManager(headless=True) as bm:
-        scraper = DiDongVietScraper(bm)
+    with BrowserManager(headless=True) as browser_manager:
+        scraper = DiDongVietScraper(browser_manager)
+        
+        # Step 1: Crawl all product listings
         logger.info("Bắt đầu crawl tất cả sản phẩm từ Di Động Việt...")
         products = scraper.crawl_all_phones()
         logger.info(f"Đã crawl được {len(products)} sản phẩm")
 
-    # Step 2: Crawl comments in parallel (multi-threaded)
-    comment_scraper = DiDongVietScraper(None)
-    all_products_data = comment_scraper.extract_all_comments_multithreaded(
-        products, max_workers=5, max_comments=300
-    )
+        # Step 2: Crawl comments in parallel
+        all_products_data = scraper.extract_all_comments_multithreaded(products, max_workers=5)
 
-    # Step 3: Save to MongoDB
-    if all_products_data:
-        saved = save_didongviet_products(all_products_data)
-        logger.info(f"Đã lưu {saved} sản phẩm vào collection 'didongviet'")
+        # Step 3: Save to MongoDB
+        if all_products_data:
+            saved = save_didongviet_products(all_products_data)
+            logger.info(f"Đã lưu {saved} sản phẩm vào collection 'didongviet'")
 
 if __name__ == "__main__":
     main()

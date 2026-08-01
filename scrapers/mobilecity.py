@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class MobileCityScraper(BaseScraper):
     """Scraper for MobileCity (https://mobilecity.vn)"""
 
-    def __init__(self, browser_manager: Optional[BrowserManager]):
+    def __init__(self, browser_manager: BrowserManager):
         super().__init__(browser_manager)
         self.site_name = "MobileCity"
         self.base_url = "https://mobilecity.vn"
@@ -93,49 +93,48 @@ class MobileCityScraper(BaseScraper):
         Cào TẤT CẢ sản phẩm điện thoại từ trang danh mục của MobileCity.
         Click "Xem thêm" để load hết sản phẩm.
         """
-        all_products = []
-        with BrowserManager(headless=True) as bm:
-            page = bm.new_page()
-            try:
-                url = f"{self.base_url}/dien-thoai"
-                logger.info(f"Crawling ALL phones from {self.site_name}: {url}")
+        products = []
+        page = self.browser_manager.new_page()
+        try:
+            url = f"{self.base_url}/dien-thoai"
+            logger.info(f"Crawling ALL phones from {self.site_name}: {url}")
 
-                if not safe_goto(page, url, timeout=60000, wait_until="domcontentloaded"):
-                    logger.warning(f"Failed to load /dien-thoai page for {self.site_name}")
-                    return all_products
+            if not safe_goto(page, url, timeout=60000, wait_until="domcontentloaded"):
+                logger.warning(f"Failed to load /dien-thoai page for {self.site_name}")
+                return products
 
-                # Click "Xem thêm" để load hết sản phẩm
-                load_more_selector = "a#product_view_more, a.more:has-text('Xem thêm')"
-                for _ in range(30): # Giới hạn 30 lần click
-                    try:
-                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                        page.wait_for_timeout(1000)
-                        
-                        load_more_btn = page.locator(load_more_selector)
-                        if load_more_btn.count() > 0 and load_more_btn.first.is_visible():
-                            logger.info(f"[{self.site_name}] Clicking 'Xem thêm'...")
-                            load_more_btn.first.click()
-                            page.wait_for_timeout(2500) # Chờ AJAX load
-                        else:
-                            logger.info(f"[{self.site_name}] Không còn nút 'Xem thêm', đã load hết sản phẩm.")
-                            break
-                    except Exception as e:
-                        logger.warning(f"[{self.site_name}] Lỗi khi click 'Xem thêm': {e}")
+            # Click "Xem thêm" để load hết sản phẩm
+            load_more_selector = "a#product_view_more, a.more:has-text('Xem thêm')"
+            for _ in range(30): # Giới hạn 30 lần click
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1000)
+                    
+                    load_more_btn = page.locator(load_more_selector)
+                    if load_more_btn.count() > 0 and load_more_btn.first.is_visible():
+                        logger.info(f"[{self.site_name}] Clicking 'Xem thêm'...")
+                        load_more_btn.first.click()
+                        page.wait_for_timeout(2500) # Chờ AJAX load
+                    else:
+                        logger.info(f"[{self.site_name}] Không còn nút 'Xem thêm', đã load hết sản phẩm.")
                         break
-                
-                # Sau khi load hết, extract tất cả sản phẩm
-                all_products = self.extract_product_info(page, "", max_products)
+                except Exception as e:
+                    logger.warning(f"[{self.site_name}] Lỗi khi click 'Xem thêm': {e}")
+                    break
+            
+            # Sau khi load hết, extract tất cả sản phẩm
+            products = self.extract_product_info(page, "", max_products)
 
-            except Exception as e:
-                logger.error(f"Error crawling all phones from {self.site_name}: {e}", exc_info=True)
-            finally:
-                page.close()
+        except Exception as e:
+            logger.error(f"Error crawling all phones from {self.site_name}: {e}", exc_info=True)
+        finally:
+            page.close()
 
         if max_products:
-            all_products = all_products[:max_products]
+            products = products[:max_products]
             
-        logger.info(f"[{self.site_name}] Crawled a total of {len(all_products)} products.")
-        return all_products
+        logger.info(f"[{self.site_name}] Crawled a total of {len(products)} products.")
+        return products
 
     def scrape_price_from_url(self, product_url: str) -> Optional[Product]:
         """
@@ -214,16 +213,16 @@ class MobileCityScraper(BaseScraper):
         product_dicts = [{"name": p.name, "price": p.price, "image_url": p.image_url, "product_url": p.product_url, "source": p.source, "comments": []} for p in products]
 
         def _fetch_comments_for_product(prod_dict: dict) -> dict:
+            page = self.browser_manager.new_page()
             try:
-                with BrowserManager(headless=True) as bm:
-                    page = bm.new_page()
-                    comments = self.extract_comments(page, prod_dict["product_url"])
-                    page.close()
-                    prod_dict["comments"] = comments[:max_comments]
-                    logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
+                comments = self.extract_comments(page, prod_dict["product_url"])
+                prod_dict["comments"] = comments[:max_comments]
+                logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
             except Exception as e:
                 logger.warning(f"  [Thread] Lỗi cào comment {prod_dict['name'][:40]}: {e}")
                 prod_dict["comments"] = []
+            finally:
+                page.close()
             return prod_dict
 
         logger.info(f"Bắt đầu cào comment multi-threaded ({max_workers} workers) cho {len(product_dicts)} sản phẩm...")
