@@ -230,68 +230,6 @@ class ViettelStoreScraper(BaseScraper):
             logger.warning(f"Error in extract_product_info: {e}")
         return products
 
-    def _extract_comments_viettel(self, context, product_url: str) -> List[str]:
-        page = context.new_page() 
-        try:
-            if not product_url:
-                return []
-
-            page.on("popup", lambda popup: popup.close())
-
-            if not safe_goto(page, product_url, timeout=20000):
-                return []
-
-            page.wait_for_timeout(3000)
-            page.evaluate("window.scrollBy(0, 1200);")
-            page.wait_for_timeout(2000)
-
-            max_clicks = 10
-            for _ in range(max_clicks):
-                try:
-                    current_items = page.locator("div.cmt-item-content div.c").count()
-                    load_more_btn = page.locator("div.cmt_loadmore a.btnAddCmt, div.cmt_loadmore a").first
-                    
-                    if load_more_btn.count() == 0 or not load_more_btn.is_visible():
-                        break
-
-                    logger.info(f"Đang bấm 'Xem thêm'... (Hiện có {current_items} câu hỏi)")
-                    load_more_btn.click(force=True)
-
-                    try:
-                        page.wait_for_function(
-                            f"() => document.querySelectorAll('div.cmt-item-content div.c').length > {current_items}",
-                            timeout=4000
-                        )
-                        logger.info("Đã load thêm câu hỏi mới!")
-                    except Exception:
-                        logger.info("Không còn câu hỏi mới để load.")
-                        break 
-
-                except Exception as e:
-                    logger.debug(f"Lỗi vòng lặp xem thêm: {e}")
-                    break
-
-            comments = []
-            comment_elements = page.locator("div.cmt-item-content div.c").all()
-            
-            for el in comment_elements:
-                try:
-                    if "QUẢN TRỊ VIÊN" not in el.inner_html():
-                        text = el.inner_text().strip()
-                        text = text.strip('"').strip("'").strip()
-                        if text and len(text) > 4:
-                            comments.append(text)
-                except Exception:
-                    continue
-
-        except Exception as e:
-            logger.debug(f"Error extracting comments: {e}")
-            return []
-        finally:
-            page.close()
-
-        return comments
-    
     def scrape_price_from_url(self, product_url: str) -> Optional[Product]:
         """
         Cào tên và giá từ một trang sản phẩm cụ thể của Viettel Store.
