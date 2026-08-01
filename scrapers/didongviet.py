@@ -280,8 +280,6 @@ class DiDongVietScraper(BaseScraper):
         logger.info(f"Đã hoàn thành cào comment cho {len(products_data)} sản phẩm (multi-threaded)")
         return products_data
 
-        return comments
-
 if __name__ == "__main__":
     import json
     import sys
