@@ -43,25 +43,27 @@ SOURCE_TO_SCRAPER = {
     "Thế Giới Di Động": TheGioiDiDongScraper,
 }
 
-def scrape_and_update_price(scraper_class, url: str) -> Optional[Dict[str, Any]]:
+def scrape_and_update_price(scraper, url: str) -> Optional[Dict[str, Any]]:
     """
-    Hàm worker để cào một URL duy nhất, sử dụng một instance trình duyệt riêng.
-    Được thiết kế để an toàn khi chạy đa luồng (thread-safe).
+    Hàm worker để cào một URL duy nhất.
+    Sử dụng scraper instance đã được khởi tạo với BrowserManager chung.
     """
     product_data = None
     try:
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = scraper_class(browser_manager)
-            # Giả định: mỗi scraper sẽ có phương thức `scrape_price_from_url`
-            if hasattr(scraper, 'scrape_price_from_url') and callable(getattr(scraper, 'scrape_price_from_url')):
-                product = scraper.scrape_price_from_url(url)
-                if product:
-                    product_data = product.to_dict()
-                    logger.info(f"  [OK] {product.source}: {product.price} - {product.name[:50]}...")
-            else:
-                logger.warning(f"Scraper {scraper_class.__name__} thiếu phương thức 'scrape_price_from_url'.")
+        # Giả định: mỗi scraper sẽ có phương thức `scrape_price_from_url`
+        # Phương thức này sẽ tự quản lý việc tạo và đóng page.
+        if hasattr(scraper, 'scrape_price_from_url') and callable(getattr(scraper, 'scrape_price_from_url')):
+            product = scraper.scrape_price_from_url(url)
+            if product:
+                product_data = {
+                    "name": product.name, "price": product.price, "image_url": product.image_url,
+                    "product_url": product.product_url, "source": product.source,
+                }
+                logger.info(f"  [OK] {product.source}: {product.price} - {product.name[:50]}...")
+        else:
+            logger.warning(f"Scraper {scraper.__class__.__name__} thiếu phương thức 'scrape_price_from_url'.")
     except Exception as e:
-        logger.error(f"Lỗi khi cào URL {url} với {scraper_class.__name__}: {e}", exc_info=False)
+        logger.error(f"Lỗi khi cào URL {url} với {scraper.__class__.__name__}: {e}", exc_info=False)
     
     return product_data
 
@@ -82,27 +84,37 @@ def main():
     total_urls = sum(len(urls) for urls in urls_by_source.values())
     logger.info(f"Tìm thấy {total_urls} URL duy nhất từ {len(urls_by_source)} nguồn để cập nhật.")
 
-    # 2. Cào giá song song
-    with ThreadPoolExecutor(max_workers=4) as executor: # Giới hạn số luồng để tránh quá tải
-        futures = []
-        for source, urls in urls_by_source.items():
-            scraper_class = SOURCE_TO_SCRAPER.get(source)
-            if not scraper_class:
-                logger.warning(f"Không tìm thấy scraper cho nguồn: '{source}'. Bỏ qua {len(urls)} URL.")
-                continue
+    # 2. Khởi tạo BrowserManager và cào giá song song
+    # Sử dụng 1 browser chung cho tất cả các luồng để tiết kiệm tài nguyên
+    with BrowserManager(headless=True) as browser_manager:
+        # Tăng số luồng vì không còn tốn tài nguyên khởi tạo browser cho mỗi task
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = []
             
-            logger.info(f"Đưa {len(urls)} URL của '{source}' vào hàng đợi cào dữ liệu...")
-            for url in urls:
-                futures.append(executor.submit(scrape_and_update_price, scraper_class, url))
+            # Tạo scraper instances với BrowserManager chung
+            scrapers = {
+                source: scraper_class(browser_manager)
+                for source, scraper_class in SOURCE_TO_SCRAPER.items()
+            }
 
-        # 3. Thu thập kết quả khi các tác vụ hoàn thành
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    all_new_products_data.append(result)
-            except Exception as e:
-                logger.error(f"Một tác vụ cào dữ liệu đã phát sinh lỗi: {e}")
+            for source, urls in urls_by_source.items():
+                scraper = scrapers.get(source)
+                if not scraper:
+                    logger.warning(f"Không tìm thấy scraper cho nguồn: '{source}'. Bỏ qua {len(urls)} URL.")
+                    continue
+                
+                logger.info(f"Đưa {len(urls)} URL của '{source}' vào hàng đợi cào dữ liệu...")
+                for url in urls:
+                    futures.append(executor.submit(scrape_and_update_price, scraper, url))
+
+            # 3. Thu thập kết quả khi các tác vụ hoàn thành
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        all_new_products_data.append(result)
+                except Exception as e:
+                    logger.error(f"Một tác vụ cào dữ liệu đã phát sinh lỗi: {e}")
 
     logger.info(f"Đã cào thành công {len(all_new_products_data)} trên tổng số {total_urls} URL.")
 
