@@ -1023,20 +1023,19 @@ def _crawl_tgdd_all_sync() -> List[Dict[str, Any]]:
 
     products_data = []
     try:
+        # Step 1: Crawl product list
         with BrowserManager(headless=True) as browser_manager:
             scraper = TheGioiDiDongScraper(browser_manager)
             logger.info("Bắt đầu crawl TẤT CẢ sản phẩm /dtdd từ TGDD...")
             products = scraper.crawl_all_dtdd()
-            for p in products:
-                products_data.append({
-                    "name": p.name,
-                    "price": p.price,
-                    "image_url": p.image_url,
-                    "product_url": p.product_url,
-                    "source": p.source,
-                    "comments": getattr(p, "comments", []),
-                })
-            logger.info(f"Crawl TGDD /dtdd hoàn tất: {len(products_data)} sản phẩm")
+            logger.info(f"Đã crawl được {len(products)} sản phẩm từ TGDD.")
+        
+        # Step 2: Crawl comments multi-threaded
+        if products:
+            scraper_for_comments = TheGioiDiDongScraper(None)
+            products_data = scraper_for_comments.extract_all_comments_multithreaded(products, max_workers=4)
+
+        logger.info(f"Crawl TGDD /dtdd hoàn tất: {len(products_data)} sản phẩm")
     except Exception as e:
         logger.error(f"Lỗi khi crawl TGDD /dtdd: {e}", exc_info=True)
     return products_data

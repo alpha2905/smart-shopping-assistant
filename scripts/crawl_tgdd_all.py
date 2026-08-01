@@ -40,41 +40,22 @@ def main():
     init_tgdd_collection()
     logger.info("=== BAT DAU CRAWL TAT CA SAN PHAM + COMMENT TGDD /dtdd ===")
 
-    products_data = []
     try:
+        # Step 1: Crawl all product listings (single-threaded)
         with BrowserManager(headless=True) as browser_manager:
             scraper = TheGioiDiDongScraper(browser_manager)
             logger.info("Dang crawl tat ca san pham tu https://www.thegioididong.com/dtdd ...")
-
-            # 1. Crawl tất cả sản phẩm
             products = scraper.crawl_all_dtdd()
             logger.info(f"Da crawl xong: {len(products)} san pham")
 
-            # 2. Cào comment cho từng sản phẩm
-            logger.info(f"Bat dau cao comment cho {len(products)} san pham...")
-
-            for idx, prod in enumerate(products, 1):
-                logger.info(f"[{idx}/{len(products)}] Dang cao comment: {prod.name[:50]}...")
-
-                comments = []
-                try:
-                    comments = scraper.extract_comments(prod.product_url)
-                    # Giới hạn tối đa 300 comment mỗi sản phẩm
-                    comments = comments[:300]
-                    logger.info(f"  -> Lay duoc {len(comments)} comment")
-                except Exception as e:
-                    logger.warning(f"  -> Khong the cao comment: {e}")
-
-                products_data.append({
-                    "name": prod.name,
-                    "price": prod.price,
-                    "image_url": prod.image_url,
-                    "product_url": prod.product_url,
-                    "source": prod.source,
-                    "comments": comments,
-                })
-
-            logger.info(f"Hoan thanh crawl: {len(products_data)} san pham + comments")
+        # Step 2: Crawl comments in parallel (multi-threaded)
+        if products:
+            comment_scraper = TheGioiDiDongScraper(None)
+            products_data = comment_scraper.extract_all_comments_multithreaded(
+                products, max_workers=4, max_comments=300
+            )
+        else:
+            products_data = []
 
     except Exception as e:
         logger.error(f"Loi khi crawl: {e}", exc_info=True)

@@ -3,6 +3,7 @@ import os
 import json
 import logging
 from typing import List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -62,17 +63,18 @@ class TheGioiDiDongScraper(BaseScraper):
             products = self.extract_product_info(page, query, max_products)
 
             if fetch_comments:
-                # --- SỬA LỖI NGHIÊM TRỌNG Ở ĐÂY ---
-                # Không truyền page chính vào nữa vì sẽ bị đổi đường dẫn. 
-                # Hàm extract_comments sẽ tự tạo page mới để xử lý.
-                for product in products[:2]:
-                    try:
-                        # Chỉ truyền URL, không truyền page
-                        comments = self.extract_comments(product.product_url)
-                        product.comments = comments
-                        logger.info(f"Lấy được {len(comments)} comment cho {product.name}")
-                    except Exception as e:
-                        logger.debug(f"Failed to get comments for {product.name}: {e}")
+                # Sử dụng context để cào comment hiệu quả hơn
+                if hasattr(self.browser_manager, 'browser') and self.browser_manager.browser:
+                    with self.browser_manager.browser.new_context() as context:
+                        for product in products[:2]:
+                            try:
+                                page_cmt = context.new_page()
+                                comments = self.extract_comments(page_cmt, product.product_url)
+                                product.comments = comments
+                                logger.info(f"Lấy được {len(comments)} comment cho {product.name}")
+                                page_cmt.close()
+                            except Exception as e:
+                                logger.debug(f"Failed to get comments for {product.name}: {e}")
 
         except Exception as e:
             logger.error(f"Error scraping {self.site_name}: {e}")
@@ -275,14 +277,11 @@ class TheGioiDiDongScraper(BaseScraper):
 
         return products
 
-    def extract_comments(self, product_url: str) -> List[str]:
+    def extract_comments(self, page: Page, product_url: str) -> List[str]:
         comments = []
-        page = None
         try:
             if not product_url:
                 return comments
-
-            page = self.browser_manager.new_page()
             if not safe_goto(page, product_url, timeout=20000):
                 return comments
 
@@ -347,11 +346,44 @@ class TheGioiDiDongScraper(BaseScraper):
         except Exception as e:
             logger.debug(f"Error extracting comments from {product_url}: {e}")
         finally:
-            if page:
-                page.close()
+            # Không đóng page ở đây vì nó được quản lý bởi hàm gọi
+            pass
 
         return comments
 
+    def extract_all_comments_multithreaded(self, products: List[Product], max_workers: int = 4, max_comments: int = 300) -> List[dict]:
+        """
+        Cào comment cho tất cả sản phẩm bằng multi-threading.
+        """
+        products_data = []
+        product_dicts = [{"name": p.name, "price": p.price, "image_url": p.image_url, "product_url": p.product_url, "source": p.source, "comments": []} for p in products]
+
+        def _fetch_comments_for_product(prod_dict: dict) -> dict:
+            """Hàm chạy trong thread riêng để cào comment cho 1 sản phẩm."""
+            try:
+                with BrowserManager(headless=True) as bm:
+                    page = bm.new_page()
+                    comments = self.extract_comments(page, prod_dict["product_url"])
+                    page.close()
+                    prod_dict["comments"] = comments[:max_comments]
+                    logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
+            except Exception as e:
+                logger.warning(f"  [Thread] Lỗi cào comment {prod_dict['name'][:40]}: {e}")
+                prod_dict["comments"] = []
+            return prod_dict
+
+        logger.info(f"Bắt đầu cào comment multi-threaded ({max_workers} workers) cho {len(product_dicts)} sản phẩm...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_comments_for_product, p) for p in product_dicts]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        products_data.append(result)
+                except Exception as e:
+                    logger.error(f"Lỗi thread cào comment: {e}")
+        logger.info(f"Đã hoàn thành cào comment cho {len(products_data)} sản phẩm (multi-threaded)")
+        return products_data
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -377,12 +409,13 @@ if __name__ == "__main__":
             for idx, prod in enumerate(products, 1):
                 print(f"[{idx}/{len(products)}] Đang cào comment cho: {prod.name}...")
                 
-                comments = []
                 try:
-                    # Gọi hàm cào comment đã có sẵn trong class scraper
-                    comments = scraper.extract_comments(prod.product_url)
-                    
-                    # Giới hạn tối đa 300 comment mỗi sản phẩm (nếu số lượng vượt quá)
+                    # Để test, ta cần tạo page và truyền vào
+                    page_cmt = browser_manager.new_page()
+                    comments = scraper.extract_comments(page_cmt, prod.product_url)
+                    page_cmt.close()
+
+                    # Giới hạn tối đa 300 comment
                     comments = comments[:300]
                     
                     print(f"  -> Lấy thành công {len(comments)} comment.")
