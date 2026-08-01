@@ -112,12 +112,41 @@ def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
 def get_product_price_history(
     product_url: str, source: str
 ) -> List[Dict[str, Any]]:
-    """Return all historical prices for a product, oldest first."""
-    col = get_collection()
-    doc = col.find_one(
-        {"product_url": product_url, "source": source},
-        {"price_history": 1, "_id": 0},
-    )
+    """Return all historical prices for a product, oldest first.
+    It checks both the dedicated source collection and the main 'products' collection.
+    """
+    db = get_db()
+    doc = None
+
+    # Mapping from source name to collection name
+    source_to_collection_map = {
+        "FPT Shop": "fpt",
+        "Thế Giới Di Động": "tgdd",
+        "CellphoneS": "cellphones",
+        "Hoàng Hà Mobile": "hoangha",
+        "Di Động Việt": "didongviet",
+        "Viettel Store": "viettelstore",
+        "Clickbuy": "clickbuy",
+        "MobileCity": "mobilecity",
+    }
+
+    # 1. Try dedicated collection first
+    collection_name = source_to_collection_map.get(source)
+    if collection_name:
+        col = db[collection_name]
+        doc = col.find_one(
+            {"product_url": product_url, "source": source},
+            {"price_history": 1, "_id": 0},
+        )
+    
+    # 2. If not found, try the main 'products' collection
+    if not doc:
+        col = get_collection() # main 'products' collection
+        doc = col.find_one(
+            {"product_url": product_url, "source": source},
+            {"price_history": 1, "_id": 0},
+        )
+
     if not doc or "price_history" not in doc:
         return []
     return sorted(doc["price_history"], key=lambda x: x["scraped_at"])
@@ -185,28 +214,42 @@ def get_latest_prices_for_query(query: str) -> List[Dict[str, Any]]:
 
 
 def get_products_with_price_history(min_history: int = 3) -> List[Dict[str, Any]]:
-    """Return products that have at least `min_history` price entries."""
-    col = get_collection()
+    """Return products that have at least `min_history` price entries from ALL collections."""
+    db = get_db()
     results = []
-    for doc in col.find({}):
-        price_history = doc.get("price_history", [])
-        if len(price_history) >= min_history:
-            results.append({
-                "product_url": doc.get("product_url", ""),
-                "source": doc.get("source", ""),
-                "name": doc.get("name", ""),
-                "image_url": doc.get("image_url", ""),
-                "query": doc.get("query", ""),
-                "price_history_count": len(price_history),
-                "latest_price": price_history[-1].get("price", "") if price_history else "",
-            })
+    
+    collection_names = [
+        "products", "tgdd", "fpt", "cellphones", "viettelstore",
+        "hoangha", "didongviet", "clickbuy", "mobilecity"
+    ]
+
+    for name in collection_names:
+        try:
+            col = db[name]
+            # Efficiently find documents with enough history using $size
+            for doc in col.find({"price_history": {"$exists": True, "$size": {"$gte": min_history}}}):
+                price_history = doc.get("price_history", [])
+                results.append({
+                    "product_url": doc.get("product_url", ""),
+                    "source": doc.get("source", ""),
+                    "name": doc.get("name", ""),
+                    "image_url": doc.get("image_url", ""),
+                    "query": doc.get("query", ""),
+                    "price_history_count": len(price_history),
+                    "latest_price": price_history[-1].get("price", "") if price_history else "",
+                })
+        except Exception as e:
+             logger.warning(f"Could not get products with history from collection '{name}': {e}")
+
     results.sort(key=lambda x: x.get("price_history_count", 0), reverse=True)
     return results
 
 
 def save_prediction(product_url: str, source: str, prediction: Dict[str, Any]) -> None:
-    """Cache LSTM prediction in the product document."""
-    col = get_collection()
+    """Cache LSTM prediction in the product document.
+    It tries to update in the dedicated source collection first, then the main 'products' collection.
+    """
+    db = get_db()
 
     # Convert numpy types to native Python types for JSON serialization
     def convert_numpy(obj):
@@ -220,13 +263,43 @@ def save_prediction(product_url: str, source: str, prediction: Dict[str, Any]) -
 
     cleaned_prediction = convert_numpy(prediction)
 
-    col.update_one(
-        {"product_url": product_url, "source": source},
-        {"$set": {
-            "prediction": cleaned_prediction,
-            "prediction_updated_at": datetime.utcnow(),
-        }},
-    )
+    update_payload = {"$set": {
+        "prediction": cleaned_prediction,
+        "prediction_updated_at": datetime.utcnow(),
+    }}
+
+    # Mapping from source name to collection name
+    source_to_collection_map = {
+        "FPT Shop": "fpt",
+        "Thế Giới Di Động": "tgdd",
+        "CellphoneS": "cellphones",
+        "Hoàng Hà Mobile": "hoangha",
+        "Di Động Việt": "didongviet",
+        "Viettel Store": "viettelstore",
+        "Clickbuy": "clickbuy",
+        "MobileCity": "mobilecity",
+    }
+
+    # 1. Try to update in dedicated collection first
+    updated = False
+    collection_name = source_to_collection_map.get(source)
+    if collection_name:
+        col = db[collection_name]
+        result = col.update_one(
+            {"product_url": product_url, "source": source},
+            update_payload,
+        )
+        if result.matched_count > 0:
+            updated = True
+    
+    # 2. If not found or not updated, try the main 'products' collection
+    if not updated:
+        col = get_collection() # main 'products' collection
+        col.update_one(
+            {"product_url": product_url, "source": source},
+            update_payload,
+        )
+
     logger.info("Cached prediction for %s/%s", source, product_url[:50])
 
 
@@ -663,9 +736,29 @@ def get_all_hoangha_products() -> List[Dict[str, Any]]:
 
 
 def get_unique_queries() -> List[str]:
-    """Return all distinct query strings ever searched."""
-    col = get_collection()
-    return col.distinct("query")
+    """Return all distinct query strings ever searched from ALL collections."""
+    db = get_db()
+    all_queries = set()
+    
+    collection_names = [
+        "products", "tgdd", "fpt", "cellphones", "viettelstore",
+        "hoangha", "didongviet", "clickbuy", "mobilecity"
+    ]
+
+    for name in collection_names:
+        try:
+            col = db[name]
+            # Check if 'query' field exists in the collection's documents
+            if col.count_documents({"query": {"$exists": True}}) > 0:
+                queries = col.distinct("query")
+                for q in queries:
+                    if q: # filter out None or empty strings
+                        all_queries.add(q)
+        except Exception as e:
+            logger.warning(f"Could not get queries from collection '{name}': {e}")
+    
+    logger.info(f"Found {len(all_queries)} unique queries across all collections.")
+    return sorted(list(all_queries))
 
 
 def close_db() -> None:
