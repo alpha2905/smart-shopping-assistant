@@ -76,6 +76,7 @@ def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
         set_fields = {
             "name": name,
             "image_url": image_url,
+            "price": price,
             "query": query,
             "last_scraped_at": now,
         }
