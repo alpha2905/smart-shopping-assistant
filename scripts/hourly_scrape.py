@@ -6,12 +6,18 @@ import logging
 
 # Thêm thư mục gốc vào path để import database
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.db import init_all_collections
+
+# Import các hàm init collection từ file database.py của bạn
+from utils.db import (
+    init_cellphones_collection, init_tgdd_collection, init_fpt_collection,
+    init_hoangha_collection, init_didongviet_collection, init_viettelstore_collection,
+    init_clickbuy_collection, init_mobilecity_collection
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Danh sách các file cào cần chạy
+# Danh sách các file cào cần chạy (đảm bảo tên file trùng khớp với thư mục scripts của bạn)
 CRAWLER_FILES = [
     "crawl_cellphones_all.py",
     "crawl_tgdd_all.py",
@@ -23,15 +29,38 @@ CRAWLER_FILES = [
     "crawl_mobilecity_all.py",
 ]
 
+def init_all_collections_manually():
+    """Gọi lần lượt các hàm khởi tạo index cho từng collection"""
+    try:
+        logger.info("🛠️ Đang khởi tạo indexes cho các collection...")
+        init_cellphones_collection()
+        init_tgdd_collection()
+        init_fpt_collection()
+        init_hoangha_collection()
+        init_didongviet_collection()
+        init_viettelstore_collection()
+        init_clickbuy_collection()
+        init_mobilecity_collection()
+        logger.info("✅ Hoàn tất khởi tạo indexes cho tất cả collection.")
+    except Exception as e:
+        logger.warning(f"⚠️ Lưu ý khi init collection (có thể đã tồn tại): {e}")
+
 def run_hourly_scrape():
     logger.info("🚀 Bắt đầu quy trình cào giá hàng giờ cho 8 sàn...")
     
-    # Khởi tạo indexes cho Mongo (chạy 1 lần là đủ)
-    init_all_collections()
+    # Khởi tạo indexes (chạy 1 lần đầu tiên là đủ, nếu lỗi cũng không sao)
+    init_all_collections_manually()
 
-    # Duyệt qua từng file và thực thi
+    # Duyệt qua từng file trong thư mục scripts và thực thi
     for file_name in CRAWLER_FILES:
+        # Đường dẫn đầy đủ tới file cào
         file_path = os.path.join("scripts", file_name)
+        
+        # Kiểm tra xem file có tồn tại không trước khi chạy
+        if not os.path.exists(file_path):
+            logger.warning(f"⚠️ Không tìm thấy file: {file_path}, bỏ qua...")
+            continue
+
         logger.info(f"👉 Đang chạy: {file_name}...")
         
         try:
@@ -40,13 +69,18 @@ def run_hourly_scrape():
                 [sys.executable, file_path],
                 capture_output=True,
                 text=True,
-                check=True
+                check=False # Đặt check=False để nếu 1 file lỗi, vẫn chạy tiếp các file sau
             )
-            logger.info(f"✅ {file_name} chạy thành công.\nOutput:\n{result.stdout}")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"❌ Lỗi khi chạy {file_name}.\nSTDERR:\n{e.stderr}")
+            
+            # In ra output nếu thành công
+            if result.returncode == 0:
+                logger.info(f"✅ {file_name} chạy thành công.\nOutput:\n{result.stdout}")
+            else:
+                # In ra lỗi nếu file chạy thất bại
+                logger.error(f"❌ {file_name} chạy thất bại với mã lỗi {result.returncode}.\nSTDERR:\n{result.stderr}")
+                
         except Exception as e:
-            logger.error(f"❌ Lỗi không xác định với {file_name}: {e}")
+            logger.error(f"❌ Lỗi không xác định khi chạy {file_name}: {e}")
 
     logger.info("🎉 Hoàn tất quy trình cào giá cho tất cả 8 sàn!")
 
