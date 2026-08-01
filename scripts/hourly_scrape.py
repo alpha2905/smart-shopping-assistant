@@ -53,7 +53,8 @@ def run_single_scraper(scraper_class, query: str, max_products: int = 5) -> List
         with BrowserManager(headless=True) as browser_manager:
             scraper = scraper_class(browser_manager)
             logger.info(f"Đang cào từ {scraper.site_name} (query='{query}')...")
-            products = scraper.search(query=query, max_products=max_products)
+            # Không cào comment trong tác vụ nền để tiết kiệm thời gian và tài nguyên
+            products = scraper.search(query=query, max_products=max_products, fetch_comments=False)
             for p in products:
                 products_data.append({
                     "name": p.name,

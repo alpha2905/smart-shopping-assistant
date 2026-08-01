@@ -5,6 +5,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import logging
 from typing import List
 from models.product import Product
+from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from scrapers.base_scraper import BaseScraper
 from utils.browser import BrowserManager, Page, safe_goto, wait_for_page_load
 
@@ -20,10 +22,9 @@ class DiDongVietScraper(BaseScraper):
         self.base_url = "https://didongviet.vn"
 
     def get_search_url(self, query: str) -> str:
-        import urllib.parse
         return f"{self.base_url}/search?q={urllib.parse.quote(query)}"
 
-    def search(self, query: str, max_products: int = 10) -> List[Product]:
+    def search(self, query: str, max_products: int = 10, fetch_comments: bool = True) -> List[Product]:
         products = []
         page = self.browser_manager.new_page()
         try:
@@ -44,13 +45,14 @@ class DiDongVietScraper(BaseScraper):
             
             products = self.extract_product_info(page, query, max_products)
             
-            # Try to get comments for first 2 products
-            for product in products[:2]:
-                try:
-                    comments = self.extract_comments(page, product.product_url)
-                    product.comments = comments
-                except Exception as e:
-                    logger.debug(f"Failed to get comments for {product.name}: {e}")
+            if fetch_comments:
+                # Try to get comments for first 2 products
+                for product in products[:2]:
+                    try:
+                        comments = self.extract_comments(page, product.product_url)
+                        product.comments = comments
+                    except Exception as e:
+                        logger.debug(f"Failed to get comments for {product.name}: {e}")
 
         except Exception as e:
             logger.error(f"Error scraping {self.site_name}: {e}")
@@ -129,34 +131,109 @@ class DiDongVietScraper(BaseScraper):
 
         return products
 
+    def crawl_all_phones(self, max_products: Optional[int] = None) -> List[Product]:
+        """
+        Cào TẤT CẢ sản phẩm điện thoại từ trang danh mục của Di Động Việt.
+        Click "Xem thêm" để load hết sản phẩm.
+        """
+        products = []
+        page = self.browser_manager.new_page()
+        try:
+            url = f"{self.base_url}/dien-thoai.html"
+            logger.info(f"Crawling ALL phones from {self.site_name}: {url}")
+
+            if not safe_goto(page, url, timeout=60000, wait_until="domcontentloaded"):
+                logger.warning(f"Failed to load /dien-thoai.html page for {self.site_name}")
+                return products
+
+            # Click "Xem thêm" để load hết sản phẩm
+            for _ in range(30): # Giới hạn 30 lần click
+                try:
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1000)
+                    load_more_btn = page.locator("button:has-text('Xem thêm')")
+                    if load_more_btn.count() > 0 and load_more_btn.first.is_visible():
+                        logger.info(f"[{self.site_name}] Clicking 'Xem thêm'...")
+                        load_more_btn.first.click()
+                        page.wait_for_timeout(2500)
+                    else:
+                        break
+                except Exception:
+                    break
+            
+            products = self.extract_product_info(page, "", max_products)
+            logger.info(f"[{self.site_name}] Đã cào được {len(products)} sản phẩm từ /dien-thoai.html")
+
+        except Exception as e:
+            logger.error(f"Error crawling all phones from {self.site_name}: {e}", exc_info=True)
+        finally:
+            page.close()
+
+        return products
+
     def extract_comments(self, page: Page, product_url: str) -> List[str]:
         comments = []
         try:
             if not product_url:
                 return comments
             
-            if not safe_goto(page, product_url, timeout=20000):
+            if not safe_goto(page, product_url, timeout=45000, wait_until="domcontentloaded"):
                 return comments
             
-            page.wait_for_timeout(2000)
-            
-            comment_elements = page.query_selector_all(
-                ".comment-content, .review-content, .customer-review, "
-                ".rating-content p, [class*='comment'] p, [class*='review'] p, "
-                ".product-comment p, .comment-item p, .feedback-content p, "
-                "[class*='feedback'] p, .rc-review p, .customer-comment p"
-            )
-            
-            for el in comment_elements[:10]:
+            # Cuộn xuống để load comment
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.6);")
+            page.wait_for_timeout(1500)
+
+            comment_tags = page.locator("p[class*='text-[13px]']").all()
+            for cmt in comment_tags:
                 try:
-                    text = el.inner_text().strip()
-                    if text and len(text) > 10:
+                    text = cmt.inner_text().strip()
+                    if text and text not in comments:
                         comments.append(text)
                 except Exception:
                     continue
                     
         except Exception as e:
             logger.debug(f"Error extracting comments from {product_url}: {e}")
+
+        return comments
+
+    def extract_all_comments_multithreaded(self, products: List[Product], max_workers: int = 5, max_comments: int = 300) -> List[dict]:
+        """
+        Cào comment cho tất cả sản phẩm bằng multi-threading.
+        """
+        products_data = []
+        product_dicts = [{"name": p.name, "price": p.price, "image_url": p.image_url, "product_url": p.product_url, "source": p.source, "comments": []} for p in products]
+
+        def _fetch_comments_for_product(prod_dict: dict) -> dict:
+            """Hàm chạy trong thread riêng để cào comment cho 1 sản phẩm."""
+            try:
+                with BrowserManager(headless=True) as bm:
+                    page = bm.new_page()
+                    product_url = prod_dict["product_url"]
+                    comments = self.extract_comments(page, product_url)
+                    page.close()
+                    prod_dict["comments"] = comments[:max_comments]
+                    logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
+            except Exception as e:
+                logger.warning(f"  [Thread] Lỗi cào comment {prod_dict['name'][:40]}: {e}")
+                prod_dict["comments"] = []
+            return prod_dict
+
+        logger.info(f"Bắt đầu cào comment multi-threaded ({max_workers} workers) cho {len(product_dicts)} sản phẩm...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_comments_for_product, p) for p in product_dicts]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        products_data.append(result)
+                except Exception as e:
+                    logger.error(f"Lỗi thread cào comment: {e}")
+
+        logger.info(f"Đã hoàn thành cào comment cho {len(products_data)} sản phẩm (multi-threaded)")
+        return products_data
 
         return comments
 

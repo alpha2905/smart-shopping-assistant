@@ -46,35 +46,21 @@ def main():
             scraper = FPTShopScraper(browser_manager)
             logger.info("Dang crawl tat ca san pham tu https://fptshop.com.vn/dien-thoai ...")
 
-            # 1. Crawl tất cả sản phẩm
+            # 1. Crawl tất cả sản phẩm (chỉ thông tin cơ bản)
             products = scraper.crawl_all_phones()
             logger.info(f"Da crawl xong: {len(products)} san pham")
 
-            # 2. Cào comment cho từng sản phẩm
-            logger.info(f"Bat dau cao comment cho {len(products)} san pham...")
-
-            for idx, prod in enumerate(products, 1):
-                logger.info(f"[{idx}/{len(products)}] Dang cao comment: {prod.name[:50]}...")
-
-                comments = []
-                try:
-                    comments = scraper.extract_comments(prod.product_url)
-                    # Giới hạn tối đa 300 comment mỗi sản phẩm
-                    comments = comments[:300]
-                    logger.info(f"  -> Lay duoc {len(comments)} comment")
-                except Exception as e:
-                    logger.warning(f"  -> Khong the cao comment: {e}")
-
-                products_data.append({
-                    "name": prod.name,
-                    "price": prod.price,
-                    "image_url": prod.image_url,
-                    "product_url": prod.product_url,
-                    "source": prod.source,
-                    "comments": comments,
-                })
-
+        # 2. Cào comment MULTI-THREADED (mỗi thread dùng BrowserManager riêng)
+        if products:
+            logger.info(f"Bắt đầu cào comment MULTI-THREADED cho {len(products)} sản phẩm (max_workers=4)...")
+            # The scraper instance for this doesn't need a pre-set browser manager
+            comment_scraper = FPTShopScraper(None)
+            products_data = comment_scraper.extract_all_comments_multithreaded(
+                products, max_workers=4, max_comments=300
+            )
             logger.info(f"Hoan thanh crawl: {len(products_data)} san pham + comments")
+        else:
+            logger.warning("Không có sản phẩm nào để cào comment.")
 
     except Exception as e:
         logger.error(f"Loi khi crawl: {e}", exc_info=True)

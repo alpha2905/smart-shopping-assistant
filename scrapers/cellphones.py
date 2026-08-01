@@ -24,10 +24,9 @@ class CellphoneSScraper(BaseScraper):
         self.base_url = "https://cellphones.com.vn"
 
     def get_search_url(self, query: str) -> str:
-        import urllib.parse
         return f"{self.base_url}/catalogsearch/result?q={urllib.parse.quote(query)}"
 
-    def search(self, query: str, max_products: int = 10) -> List[Product]:
+    def search(self, query: str, max_products: int = 10, fetch_comments: bool = True) -> List[Product]:
         products = []
         page = self.browser_manager.new_page()
         try:
@@ -46,12 +45,13 @@ class CellphoneSScraper(BaseScraper):
 
             products = self.extract_product_info(page, query, max_products)
 
-            for product in products[:2]:
-                try:
-                    comments = self.extract_comments(page, product.product_url)
-                    product.comments = comments
-                except Exception as e:
-                    logger.debug(f"Failed to get comments for {product.name}: {e}")
+            if fetch_comments:
+                for product in products[:2]:
+                    try:
+                        comments = self.extract_comments(page, product.product_url)
+                        product.comments = comments
+                    except Exception as e:
+                        logger.debug(f"Failed to get comments for {product.name}: {e}")
 
         except Exception as e:
             logger.error(f"Error scraping {self.site_name}: {e}")
@@ -194,7 +194,7 @@ class CellphoneSScraper(BaseScraper):
             page.wait_for_timeout(3000)
 
             # Click "Xem thêm" để load thêm sản phẩm
-            max_click_rounds = 50
+            max_click_rounds = 30
             for round_idx in range(max_click_rounds):
                 try:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
@@ -496,7 +496,7 @@ if __name__ == "__main__":
             scraper = CellphoneSScraper(browser_manager=browser_manager)
 
             print("Đang crawl tất cả sản phẩm từ /mobile.html...")
-            products = scraper.crawl_all_phones(max_products=10)
+            products = scraper.crawl_all_phones(max_products=None)
 
             print(f"\nKết quả tìm thấy: {len(products)} sản phẩm\n" + "-" * 50)
 

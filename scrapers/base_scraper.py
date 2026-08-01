@@ -27,7 +27,7 @@ class BaseScraper(ABC):
         self.base_url: str = ""
 
     @abstractmethod
-    def search(self, query: str, max_products: int = 10) -> List[Product]:
+    def search(self, query: str, max_products: int = 10, fetch_comments: bool = True) -> List[Product]:
         """
         Search for products on the site.
         

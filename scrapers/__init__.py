@@ -6,6 +6,7 @@ from scrapers.hoanghamobile import HoangHaMobileScraper
 from scrapers.didongviet import DiDongVietScraper
 from scrapers.viettelstore import ViettelStoreScraper
 from scrapers.clickbuy import ClickbuyScraper
+from scrapers.mobilecity import MobileCityScraper
 
 __all__ = [
     "BaseScraper",
@@ -16,4 +17,5 @@ __all__ = [
     "DiDongVietScraper",
     "ViettelStoreScraper",
     "ClickbuyScraper",
+    "MobileCityScraper",
 ]

@@ -25,7 +25,7 @@ class TheGioiDiDongScraper(BaseScraper):
     def get_search_url(self, query: str) -> str:
         return f"{self.base_url}/tim-kiem?key={urllib.parse.quote(query)}"
 
-    def search(self, query: str, max_products: int = 10) -> List[Product]:
+    def search(self, query: str, max_products: int = 10, fetch_comments: bool = True) -> List[Product]:
         products = []
         page = self.browser_manager.new_page()
         try:
@@ -61,17 +61,18 @@ class TheGioiDiDongScraper(BaseScraper):
             self.wait_and_scroll(page, initial_wait=3000, scroll_times=4)
             products = self.extract_product_info(page, query, max_products)
 
-            # --- SỬA LỖI NGHIÊM TRỌNG Ở ĐÂY ---
-            # Không truyền page chính vào nữa vì sẽ bị đổi đường dẫn. 
-            # Hàm extract_comments sẽ tự tạo page mới để xử lý.
-            for product in products[:2]:
-                try:
-                    # Chỉ truyền URL, không truyền page
-                    comments = self.extract_comments(product.product_url)
-                    product.comments = comments
-                    logger.info(f"Lấy được {len(comments)} comment cho {product.name}")
-                except Exception as e:
-                    logger.debug(f"Failed to get comments for {product.name}: {e}")
+            if fetch_comments:
+                # --- SỬA LỖI NGHIÊM TRỌNG Ở ĐÂY ---
+                # Không truyền page chính vào nữa vì sẽ bị đổi đường dẫn. 
+                # Hàm extract_comments sẽ tự tạo page mới để xử lý.
+                for product in products[:2]:
+                    try:
+                        # Chỉ truyền URL, không truyền page
+                        comments = self.extract_comments(product.product_url)
+                        product.comments = comments
+                        logger.info(f"Lấy được {len(comments)} comment cho {product.name}")
+                    except Exception as e:
+                        logger.debug(f"Failed to get comments for {product.name}: {e}")
 
         except Exception as e:
             logger.error(f"Error scraping {self.site_name}: {e}")

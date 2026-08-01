@@ -3,6 +3,8 @@ import os
 import json
 import logging
 from typing import List, Optional
+from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -25,7 +27,7 @@ class FPTShopScraper(BaseScraper):
     def get_search_url(self, query: str) -> str:
         return f"{self.base_url}/tim-kiem?key={urllib.parse.quote(query)}"
 
-    def search(self, query: str, max_products: Optional[int] = None) -> List[Product]:
+    def search(self, query: str, max_products: Optional[int] = 10, fetch_comments: bool = True) -> List[Product]:
         products = []
         page = self.browser_manager.new_page()
         try:
@@ -40,23 +42,27 @@ class FPTShopScraper(BaseScraper):
                 logger.warning(f"[{self.site_name}] Search page appears invalid or blocked")
                 return products
 
-            self.wait_and_scroll(page, initial_wait=3000, scroll_times=4)
-            products = self.extract_product_info(page, query, max_products)
-
-            # Lấy comment cho từng sản phẩm
-            for product in products[:max_products if max_products else len(products)]:
+            # Bấm "Xem thêm" để load hết sản phẩm trên trang tìm kiếm
+            for _ in range(30): # Giới hạn 30 lần click
                 try:
-                    comments = self.extract_comments(product.product_url)
-                    product.comments = comments
-                    logger.info(f"Lấy được {len(comments)} comment cho {product.name}")
-                except Exception as e:
-                    logger.debug(f"Failed to get comments for {product.name}: {e}")
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1000)
+                    load_more_btn = page.locator("button:has-text('Xem thêm')")
+                    if load_more_btn.count() > 0 and load_more_btn.first.is_visible():
+                        logger.info(f"[{self.site_name}] Clicking 'Xem thêm' on search page...")
+                        load_more_btn.first.click()
+                        page.wait_for_timeout(3000) # Chờ AJAX load
+                    else:
+                        break
+                except Exception:
+                    break
+
+            products = self.extract_product_info(page, query, max_products)
 
         except Exception as e:
             logger.error(f"Error scraping {self.site_name}: {e}")
         finally:
             page.close()
-
         return products
 
     def _get_total_pages(self, page: Page) -> int:
@@ -216,83 +222,30 @@ class FPTShopScraper(BaseScraper):
 
             page.wait_for_timeout(3000)
 
-            # Cuộn xuống để load lazy images
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-            page.wait_for_timeout(2000)
-            page.evaluate("window.scrollTo(0, 0);")
-            page.wait_for_timeout(1000)
-
-            # Lấy tổng số trang
-            total_pages = self._get_total_pages(page)
-            logger.info(f"[{self.site_name}] Tổng số trang: {total_pages}")
-
-            # Trang hiện tại là trang 1
-            current_page = 1
-
-            while current_page <= total_pages:
-                logger.info(f"[{self.site_name}] Đang xử lý trang {current_page}/{total_pages}")
-
-                # Cuộn để load hết sản phẩm trên trang hiện tại
-                for _ in range(5):
+            # Bấm "Xem thêm" để load hết sản phẩm
+            for _ in range(30): # Giới hạn 30 lần click
+                try:
                     page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
                     page.wait_for_timeout(1000)
-
-                # Extract sản phẩm từ trang hiện tại
-                page_products = self._extract_products_from_page(page, max_products)
-                logger.info(f"[{self.site_name}] Trang {current_page}: tìm thấy {len(page_products)} sản phẩm")
-
-                # Kiểm tra trùng lặp trước khi thêm
-                existing_urls = {p.product_url for p in products}
-                new_products = [p for p in page_products if p.product_url not in existing_urls]
-                products.extend(new_products)
-                logger.info(f"[{self.site_name}] Thêm {len(new_products)} sản phẩm mới (tổng: {len(products)})")
-
-                # Kiểm tra nếu đã đủ số lượng max_products
-                if max_products and len(products) >= max_products:
-                    logger.info(f"[{self.site_name}] Đã đạt max_products={max_products}, dừng lại")
-                    products = products[:max_products]
-                    break
-
-                # Chuyển sang trang tiếp theo
-                current_page += 1
-                if current_page > total_pages:
-                    break
-
-                # Tìm link đến trang tiếp theo và click
-                try:
-                    next_page_link = page.locator(f"span.pagerLink:has-text('{current_page}'), "
-                                                   f"a.pagerLink:has-text('{current_page}'), "
-                                                   f"[class*='pagerLink']:has-text('{current_page}')")
-                    if next_page_link.count() > 0 and next_page_link.first.is_visible():
-                        logger.info(f"[{self.site_name}] Chuyển sang trang {current_page}")
-                        next_page_link.first.click()
-                        page.wait_for_timeout(3000)
-                        # Đợi trang mới load
-                        for _ in range(3):
-                            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
-                            page.wait_for_timeout(1000)
+                    load_more_btn = page.locator("button:has-text('Xem thêm')")
+                    if load_more_btn.count() > 0 and load_more_btn.first.is_visible():
+                        logger.info(f"[{self.site_name}] Clicking 'Xem thêm' on category page...")
+                        load_more_btn.first.click()
+                        page.wait_for_timeout(3000) # Chờ AJAX load
                     else:
-                        # Thử click bằng href hoặc tìm kiếm
-                        all_pager = page.locator("[class*='pagerLink']").all()
-                        clicked = False
-                        for pager in all_pager:
-                            try:
-                                text = pager.inner_text().strip()
-                                if text == str(current_page):
-                                    pager.click()
-                                    page.wait_for_timeout(3000)
-                                    clicked = True
-                                    break
-                            except Exception:
-                                continue
-                        if not clicked:
-                            logger.warning(f"[{self.site_name}] Không tìm thấy link trang {current_page}, dừng phân trang")
-                            break
+                        logger.info(f"[{self.site_name}] Không còn nút 'Xem thêm', đã load hết sản phẩm.")
+                        break
                 except Exception as e:
-                    logger.warning(f"[{self.site_name}] Lỗi khi chuyển trang {current_page}: {e}")
+                    logger.warning(f"[{self.site_name}] Lỗi khi click 'Xem thêm': {e}")
                     break
 
-            logger.info(f"[{self.site_name}] Đã cào được tổng cộng {len(products)} sản phẩm từ /dien-thoai ({total_pages} trang)")
+            # Sau khi load hết, extract tất cả sản phẩm
+            products = self._extract_products_from_page(page, max_products)
+
+            if max_products and len(products) > max_products:
+                products = products[:max_products]
+
+            logger.info(f"[{self.site_name}] Đã cào được tổng cộng {len(products)} sản phẩm từ /dien-thoai")
 
         except Exception as e:
             logger.error(f"Error crawling all phones from {self.site_name}: {e}", exc_info=True)
@@ -327,70 +280,104 @@ class FPTShopScraper(BaseScraper):
 
         return products
 
-    def extract_comments(self, product_url: str) -> List[str]:
+    def extract_comments(self, page: Page, product_url: str) -> List[str]:
         """
         Extract comments/reviews from a FPT Shop product page.
-        Tìm comment trong span.break-word hoặc các container comment khác.
+        Uses the provided logic for comment extraction and pagination.
         """
         comments = []
-        page = None
         try:
             if not product_url:
                 return comments
 
-            page = self.browser_manager.new_page()
-            if not safe_goto(page, product_url, timeout=20000):
+            if not safe_goto(page, product_url, timeout=45000):
                 return comments
 
-            # Cuộn xuống khu vực đánh giá
-            for _ in range(3):
-                page.evaluate("window.scrollBy(0, 800);")
-                page.wait_for_timeout(1000)
+            page.wait_for_timeout(1500) # Initial wait
 
-            # Click "Xem thêm đánh giá" nếu có
-            max_click_attempts = 10
-            for i in range(max_click_attempts):
+            page_num = 1
+            while True:
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(1500)
+
+                detail_soup = BeautifulSoup(page.content(), "html.parser")
+
+                # Cào nội dung bình luận (Bỏ qua tên người dùng)
+                comment_blocks = detail_soup.find_all(
+                    "div", class_=lambda x: x and "flex flex-col pb-4 pt-0" in x
+                )
+                for block in comment_blocks:
+                    content_tag = block.find(
+                        "div",
+                        class_=lambda x: x and "text-textOnWhitePrimary b2-regular" in x,
+                    )
+                    content = content_tag.text.strip() if content_tag else ""
+                    if content and content not in comments:
+                        comments.append(content)
+
+                # Xử lý lật trang bình luận
                 try:
-                    # Tìm nút "Xem thêm" theo text, vì class thường là generic
-                    btn_load_more = page.locator("button:has-text('Xem thêm'), a:has-text('Xem thêm')")
-                    if btn_load_more.count() > 0 and btn_load_more.first.is_visible():
-                        logger.info("Tìm thấy nút 'Xem thêm' đánh giá.")
-                        btn_load_more.first.click()
-                        page.wait_for_timeout(2500)
-                    else:
+                    # Selector cho nút next page của FPT Shop comments
+                    next_btn_locator = page.locator("nav ul li").last
+                    
+                    # Check if the last li element has 'cursor-not-allowed' class
+                    classes = next_btn_locator.get_attribute("class") or ""
+                    if "cursor-not-allowed" in classes:
+                        break # No more pages
+
+                    next_btn_locator.scroll_into_view_if_needed()
+                    next_btn_locator.click()
+                    page_num += 1
+                    page.wait_for_timeout(2500) # Wait for AJAX
+
+                    if page_num > 20:  # Safety limit
+                        logger.info(f"Reached safety limit of 20 comment pages for {product_url}")
                         break
                 except Exception as e:
-                    logger.debug(f"Lỗi khi click nút xem thêm: {e}")
+                    logger.debug(f"Error navigating comment pages for {product_url}: {e}")
                     break
-
-            # Lấy danh sách comment - ưu tiên span.break-word (theo cấu trúc HTML bạn cung cấp)
-            comment_elements = page.locator(
-                "span.break-word, "
-                "div[class*='comment'] p, "
-                "div[class*='review'] p, "
-                ".comment-content, "
-                ".review-content, "
-                "p[class*='comment'], "
-                "p[class*='review'], "
-                "[class*='comment']"
-            ).all()
-
-            for el in comment_elements:
-                try:
-                    text = el.inner_text().strip()
-                    text = text.strip('"').strip("'")
-                    if text and len(text) > 5 and text not in comments:
-                        comments.append(text)
-                except Exception:
-                    continue
 
         except Exception as e:
             logger.debug(f"Error extracting comments from {product_url}: {e}")
-        finally:
-            if page:
-                page.close()
 
         return comments
+
+    def extract_all_comments_multithreaded(self, products: List[Product], max_workers: int = 4, max_comments: int = 300) -> List[dict]:
+        """
+        Cào comment cho tất cả sản phẩm bằng multi-threading.
+        """
+        products_data = []
+        product_dicts = [{"name": p.name, "price": p.price, "image_url": p.image_url, "product_url": p.product_url, "source": p.source, "comments": []} for p in products]
+
+        def _fetch_comments_for_product(prod_dict: dict) -> dict:
+            """Hàm chạy trong thread riêng để cào comment cho 1 sản phẩm."""
+            try:
+                with BrowserManager(headless=True) as bm:
+                    page = bm.new_page()
+                    product_url = prod_dict["product_url"]
+                    comments = self.extract_comments(page, product_url)
+                    page.close()
+                    prod_dict["comments"] = comments[:max_comments]
+                    logger.info(f"  [Thread] {prod_dict['name'][:40]}... -> {len(comments)} comments")
+            except Exception as e:
+                logger.warning(f"  [Thread] Lỗi cào comment {prod_dict['name'][:40]}: {e}")
+                prod_dict["comments"] = []
+            return prod_dict
+
+        logger.info(f"Bắt đầu cào comment multi-threaded ({max_workers} workers) cho {len(product_dicts)} sản phẩm...")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(_fetch_comments_for_product, p) for p in product_dicts]
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    if result:
+                        products_data.append(result)
+                except Exception as e:
+                    logger.error(f"Lỗi thread cào comment: {e}")
+
+        logger.info(f"Đã hoàn thành cào comment cho {len(products_data)} sản phẩm (multi-threaded)")
+        return products_data
 
 
 if __name__ == "__main__":

@@ -330,6 +330,338 @@ def get_all_tgdd_products() -> List[Dict[str, Any]]:
     return results
 
 
+def get_mobilecity_collection():
+    """Return the 'mobilecity' collection."""
+    return get_db()["mobilecity"]
+
+
+def init_mobilecity_collection() -> None:
+    """Create indexes for the 'mobilecity' collection if they don't exist."""
+    col = get_mobilecity_collection()
+    col.create_index([("product_url", ASCENDING)], unique=True)
+    col.create_index([("name", ASCENDING)])
+    col.create_index([("last_scraped_at", DESCENDING)])
+    logger.info("MongoDB 'mobilecity' collection indexes initialized")
+
+
+def save_mobilecity_products(products: List[Dict[str, Any]]) -> int:
+    """
+    Upsert products vào collection 'mobilecity' (riêng biệt).
+    """
+    col = get_mobilecity_collection()
+    now = datetime.utcnow()
+    saved = 0
+
+    for prod in products:
+        product_url = prod.get("product_url", "")
+        if not product_url:
+            continue
+
+        price = prod.get("price", "")
+        set_fields = {
+            "name": prod.get("name", ""),
+            "image_url": prod.get("image_url", ""),
+            "price": price,
+            "source": prod.get("source", "MobileCity"),
+            "last_scraped_at": now,
+        }
+
+        comments = prod.get("comments", [])
+        if comments:
+            set_fields["comments"] = comments
+            set_fields["comments_count"] = len(comments)
+            set_fields["comments_updated_at"] = now
+
+        col.update_one(
+            {"product_url": product_url},
+            {
+                "$set": set_fields,
+                "$push": {
+                    "price_history": {
+                        "price": price,
+                        "scraped_at": now,
+                    }
+                },
+            },
+            upsert=True,
+        )
+        saved += 1
+
+    logger.info("Saved %d products to 'mobilecity' collection", saved)
+    return saved
+
+
+def get_all_mobilecity_products() -> List[Dict[str, Any]]:
+    """Return all products from the 'mobilecity' collection."""
+    col = get_mobilecity_collection()
+    results = []
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "price": doc.get("price", latest_price.get("price", "")),
+            "source": doc.get("source", "MobileCity"),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "comments": doc.get("comments", []),
+            "comments_count": doc.get("comments_count", 0),
+            "price_history_count": len(price_history),
+        })
+    results.sort(key=lambda x: x.get("name", ""))
+    return results
+
+
+def get_clickbuy_collection():
+    """Return the 'clickbuy' collection."""
+    return get_db()["clickbuy"]
+
+
+def init_clickbuy_collection() -> None:
+    """Create indexes for the 'clickbuy' collection if they don't exist."""
+    col = get_clickbuy_collection()
+    col.create_index([("product_url", ASCENDING)], unique=True)
+    col.create_index([("name", ASCENDING)])
+    col.create_index([("last_scraped_at", DESCENDING)])
+    logger.info("MongoDB 'clickbuy' collection indexes initialized")
+
+
+def save_clickbuy_products(products: List[Dict[str, Any]]) -> int:
+    """
+    Upsert products vào collection 'clickbuy' (riêng biệt).
+    """
+    col = get_clickbuy_collection()
+    now = datetime.utcnow()
+    saved = 0
+
+    for prod in products:
+        product_url = prod.get("product_url", "")
+        if not product_url:
+            continue
+
+        price = prod.get("price", "")
+        set_fields = {
+            "name": prod.get("name", ""),
+            "image_url": prod.get("image_url", ""),
+            "price": price,
+            "source": prod.get("source", "Clickbuy"),
+            "last_scraped_at": now,
+        }
+
+        comments = prod.get("comments", [])
+        if comments:
+            set_fields["comments"] = comments
+            set_fields["comments_count"] = len(comments)
+            set_fields["comments_updated_at"] = now
+
+        col.update_one(
+            {"product_url": product_url},
+            {
+                "$set": set_fields,
+                "$push": {
+                    "price_history": {
+                        "price": price,
+                        "scraped_at": now,
+                    }
+                },
+            },
+            upsert=True,
+        )
+        saved += 1
+
+    logger.info("Saved %d products to 'clickbuy' collection", saved)
+    return saved
+
+
+def get_all_clickbuy_products() -> List[Dict[str, Any]]:
+    """Return all products from the 'clickbuy' collection."""
+    col = get_clickbuy_collection()
+    results = []
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "price": doc.get("price", latest_price.get("price", "")),
+            "source": doc.get("source", "Clickbuy"),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "comments": doc.get("comments", []),
+            "comments_count": doc.get("comments_count", 0),
+            "price_history_count": len(price_history),
+        })
+    results.sort(key=lambda x: x.get("name", ""))
+    return results
+
+
+def get_didongviet_collection():
+    """Return the 'didongviet' collection."""
+    return get_db()["didongviet"]
+
+
+def init_didongviet_collection() -> None:
+    """Create indexes for the 'didongviet' collection if they don't exist."""
+    col = get_didongviet_collection()
+    col.create_index([("product_url", ASCENDING)], unique=True)
+    col.create_index([("name", ASCENDING)])
+    col.create_index([("last_scraped_at", DESCENDING)])
+    logger.info("MongoDB 'didongviet' collection indexes initialized")
+
+
+def save_didongviet_products(products: List[Dict[str, Any]]) -> int:
+    """
+    Upsert products vào collection 'didongviet' (riêng biệt).
+    """
+    col = get_didongviet_collection()
+    now = datetime.utcnow()
+    saved = 0
+
+    for prod in products:
+        product_url = prod.get("product_url", "")
+        if not product_url:
+            continue
+
+        price = prod.get("price", "")
+        set_fields = {
+            "name": prod.get("name", ""),
+            "image_url": prod.get("image_url", ""),
+            "price": price,
+            "source": prod.get("source", "Di Động Việt"),
+            "last_scraped_at": now,
+        }
+
+        comments = prod.get("comments", [])
+        if comments:
+            set_fields["comments"] = comments
+            set_fields["comments_count"] = len(comments)
+            set_fields["comments_updated_at"] = now
+
+        col.update_one(
+            {"product_url": product_url},
+            {
+                "$set": set_fields,
+                "$push": {
+                    "price_history": {
+                        "price": price,
+                        "scraped_at": now,
+                    }
+                },
+            },
+            upsert=True,
+        )
+        saved += 1
+
+    logger.info("Saved %d products to 'didongviet' collection", saved)
+    return saved
+
+
+def get_all_didongviet_products() -> List[Dict[str, Any]]:
+    """Return all products from the 'didongviet' collection."""
+    col = get_didongviet_collection()
+    results = []
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "price": doc.get("price", latest_price.get("price", "")),
+            "source": doc.get("source", "Di Động Việt"),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "comments": doc.get("comments", []),
+            "comments_count": doc.get("comments_count", 0),
+            "price_history_count": len(price_history),
+        })
+    results.sort(key=lambda x: x.get("name", ""))
+    return results
+
+
+def get_hoangha_collection():
+    """Return the 'hoangha' collection."""
+    return get_db()["hoangha"]
+
+
+def init_hoangha_collection() -> None:
+    """Create indexes for the 'hoangha' collection if they don't exist."""
+    col = get_hoangha_collection()
+    col.create_index([("product_url", ASCENDING)], unique=True)
+    col.create_index([("name", ASCENDING)])
+    col.create_index([("last_scraped_at", DESCENDING)])
+    logger.info("MongoDB 'hoangha' collection indexes initialized")
+
+
+def save_hoangha_products(products: List[Dict[str, Any]]) -> int:
+    """
+    Upsert products vào collection 'hoangha' (riêng biệt).
+    """
+    col = get_hoangha_collection()
+    now = datetime.utcnow()
+    saved = 0
+
+    for prod in products:
+        product_url = prod.get("product_url", "")
+        if not product_url:
+            continue
+
+        price = prod.get("price", "")
+        set_fields = {
+            "name": prod.get("name", ""),
+            "image_url": prod.get("image_url", ""),
+            "price": price,
+            "source": prod.get("source", "Hoàng Hà Mobile"),
+            "last_scraped_at": now,
+        }
+
+        comments = prod.get("comments", [])
+        if comments:
+            set_fields["comments"] = comments
+            set_fields["comments_count"] = len(comments)
+            set_fields["comments_updated_at"] = now
+
+        col.update_one(
+            {"product_url": product_url},
+            {
+                "$set": set_fields,
+                "$push": {
+                    "price_history": {
+                        "price": price,
+                        "scraped_at": now,
+                    }
+                },
+            },
+            upsert=True,
+        )
+        saved += 1
+
+    logger.info("Saved %d products to 'hoangha' collection", saved)
+    return saved
+
+
+def get_all_hoangha_products() -> List[Dict[str, Any]]:
+    """Return all products from the 'hoangha' collection."""
+    col = get_hoangha_collection()
+    results = []
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "price": doc.get("price", latest_price.get("price", "")),
+            "source": doc.get("source", "Hoàng Hà Mobile"),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "comments": doc.get("comments", []),
+            "comments_count": doc.get("comments_count", 0),
+            "price_history_count": len(price_history),
+        })
+    results.sort(key=lambda x: x.get("name", ""))
+    return results
+
+
 def get_unique_queries() -> List[str]:
     """Return all distinct query strings ever searched."""
     col = get_collection()
@@ -514,3 +846,86 @@ def save_fpt_products_incremental(products: List[Dict[str, Any]]) -> int:
 
     logger.info("Saved %d products incrementally to 'fpt' collection", saved)
     return saved
+
+
+def get_viettelstore_collection():
+    """Return the 'viettelstore' collection."""
+    return get_db()["viettelstore"]
+
+
+def init_viettelstore_collection() -> None:
+    """Create indexes for the 'viettelstore' collection if they don't exist."""
+    col = get_viettelstore_collection()
+    col.create_index([("product_url", ASCENDING)], unique=True)
+    col.create_index([("name", ASCENDING)])
+    col.create_index([("last_scraped_at", DESCENDING)])
+    logger.info("MongoDB 'viettelstore' collection indexes initialized")
+
+
+def save_viettelstore_products(products: List[Dict[str, Any]]) -> int:
+    """
+    Upsert products vào collection 'viettelstore' (riêng biệt).
+    """
+    col = get_viettelstore_collection()
+    now = datetime.utcnow()
+    saved = 0
+
+    for prod in products:
+        product_url = prod.get("product_url", "")
+        if not product_url:
+            continue
+
+        price = prod.get("price", "")
+        set_fields = {
+            "name": prod.get("name", ""),
+            "image_url": prod.get("image_url", ""),
+            "price": price,
+            "source": prod.get("source", "Viettel Store"),
+            "last_scraped_at": now,
+        }
+
+        comments = prod.get("comments", [])
+        if comments:
+            set_fields["comments"] = comments
+            set_fields["comments_count"] = len(comments)
+            set_fields["comments_updated_at"] = now
+
+        col.update_one(
+            {"product_url": product_url},
+            {
+                "$set": set_fields,
+                "$push": {
+                    "price_history": {
+                        "price": price,
+                        "scraped_at": now,
+                    }
+                },
+            },
+            upsert=True,
+        )
+        saved += 1
+
+    logger.info("Saved %d products to 'viettelstore' collection", saved)
+    return saved
+
+
+def get_all_viettelstore_products() -> List[Dict[str, Any]]:
+    """Return all products from the 'viettelstore' collection."""
+    col = get_viettelstore_collection()
+    results = []
+    for doc in col.find({}):
+        price_history = doc.get("price_history", [])
+        latest_price = price_history[-1] if price_history else {}
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "name": doc.get("name", ""),
+            "image_url": doc.get("image_url", ""),
+            "price": doc.get("price", latest_price.get("price", "")),
+            "source": doc.get("source", "Viettel Store"),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "comments": doc.get("comments", []),
+            "comments_count": doc.get("comments_count", 0),
+            "price_history_count": len(price_history),
+        })
+    results.sort(key=lambda x: x.get("name", ""))
+    return results
