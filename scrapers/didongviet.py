@@ -4,15 +4,15 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import logging
 from typing import List
-from models.product import Product
 from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import urllib.parse
+
+from models.product import Product
 from scrapers.base_scraper import BaseScraper
 from utils.browser import BrowserManager, Page, safe_goto, wait_for_page_load
 
 logger = logging.getLogger(__name__)
-
-
 class DiDongVietScraper(BaseScraper):
     """Scraper for Di Động Việt (https://didongviet.vn)"""
 
@@ -130,6 +130,51 @@ class DiDongVietScraper(BaseScraper):
             logger.warning(f"Error in extract_product_info for {self.site_name}: {e}")
 
         return products
+
+    def scrape_price_from_url(self, product_url: str) -> Optional[Product]:
+        """
+        Cào tên và giá từ một trang sản phẩm cụ thể của Di Động Việt.
+        """
+        page = self.browser_manager.new_page()
+        try:
+            if not safe_goto(page, product_url, timeout=45000):
+                logger.warning(f"[{self.site_name}] Không thể tải trang sản phẩm: {product_url}")
+                return None
+
+            # Chờ cho tên sản phẩm và giá xuất hiện
+            page.wait_for_selector("h1, .price-goc, .price-final", timeout=15000)
+
+            name_el = page.query_selector("h1")
+            name = name_el.inner_text().strip() if name_el else ""
+
+            price_el = page.query_selector(".price-goc")
+            if not price_el:
+                price_el = page.query_selector(".price-final")
+            price = price_el.inner_text().strip() if price_el else "Liên hệ"
+            
+            img_el = page.query_selector(".swiper-wrapper .swiper-slide img")
+            image_url = ""
+            if img_el:
+                src = img_el.get_attribute("src")
+                if src and src.startswith("http"):
+                    image_url = src
+
+            if not name:
+                logger.warning(f"[{self.site_name}] Không tìm thấy tên sản phẩm tại {product_url}")
+                return None
+
+            return Product(
+                name=name,
+                price=price,
+                image_url=image_url,
+                product_url=product_url,
+                source=self.site_name
+            )
+        except Exception as e:
+            logger.error(f"[{self.site_name}] Lỗi khi cào giá từ {product_url}: {e}")
+            return None
+        finally:
+            page.close()
 
     def crawl_all_phones(self, max_products: Optional[int] = None) -> List[Product]:
         """

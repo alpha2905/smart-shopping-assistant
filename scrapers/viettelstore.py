@@ -292,6 +292,112 @@ class ViettelStoreScraper(BaseScraper):
 
         return comments
     
+    def scrape_price_from_url(self, product_url: str) -> Optional[Product]:
+        """
+        Cào tên và giá từ một trang sản phẩm cụ thể của Viettel Store.
+        """
+        page = self.browser_manager.new_page()
+        try:
+            if not safe_goto(page, product_url, timeout=45000):
+                logger.warning(f"[{self.site_name}] Không thể tải trang sản phẩm: {product_url}")
+                return None
+
+            # Chờ cho tên sản phẩm và giá xuất hiện
+            page.wait_for_selector("h1, .product-price-info .price", timeout=15000)
+
+            name_el = page.query_selector("h1")
+            name = name_el.inner_text().strip() if name_el else ""
+
+            price_el = page.query_selector(".product-price-info .price")
+            price = price_el.inner_text().strip() if price_el else "Liên hệ"
+            
+            img_el = page.query_selector(".img-product-detail img")
+            image_url = ""
+            if img_el:
+                src = img_el.get_attribute("src")
+                if src and src.startswith("http"):
+                    image_url = src
+
+            if not name:
+                logger.warning(f"[{self.site_name}] Không tìm thấy tên sản phẩm tại {product_url}")
+                return None
+
+            return Product(
+                name=name,
+                price=price,
+                image_url=image_url,
+                product_url=product_url,
+                source=self.site_name
+            )
+        except Exception as e:
+            logger.error(f"[{self.site_name}] Lỗi khi cào giá từ {product_url}: {e}")
+            return None
+        finally:
+            page.close()
+
+    def _extract_comments_viettel(self, context, product_url: str) -> List[str]:
+        page = context.new_page() 
+        try:
+            if not product_url:
+                return []
+
+            page.on("popup", lambda popup: popup.close())
+
+            if not safe_goto(page, product_url, timeout=20000):
+                return []
+
+            page.wait_for_timeout(3000)
+            page.evaluate("window.scrollBy(0, 1200);")
+            page.wait_for_timeout(2000)
+
+            max_clicks = 10
+            for _ in range(max_clicks):
+                try:
+                    current_items = page.locator("div.cmt-item-content div.c").count()
+                    load_more_btn = page.locator("div.cmt_loadmore a.btnAddCmt, div.cmt_loadmore a").first
+                    
+                    if load_more_btn.count() == 0 or not load_more_btn.is_visible():
+                        break
+
+                    logger.info(f"Đang bấm 'Xem thêm'... (Hiện có {current_items} câu hỏi)")
+                    load_more_btn.click(force=True)
+
+                    try:
+                        page.wait_for_function(
+                            f"() => document.querySelectorAll('div.cmt-item-content div.c').length > {current_items}",
+                            timeout=4000
+                        )
+                        logger.info("Đã load thêm câu hỏi mới!")
+                    except Exception:
+                        logger.info("Không còn câu hỏi mới để load.")
+                        break 
+
+                except Exception as e:
+                    logger.debug(f"Lỗi vòng lặp xem thêm: {e}")
+                    break
+
+            comments = []
+            comment_elements = page.locator("div.cmt-item-content div.c").all()
+            
+            for el in comment_elements:
+                try:
+                    if "QUẢN TRỊ VIÊN" not in el.inner_html():
+                        text = el.inner_text().strip()
+                        text = text.strip('"').strip("'").strip()
+                        if text and len(text) > 4:
+                            comments.append(text)
+                except Exception:
+                    continue
+
+        except Exception as e:
+            logger.debug(f"Error extracting comments: {e}")
+            return []
+        finally:
+            page.close()
+
+        return comments
+    
+
     def extract_comments_legacy(self, product_url: str) -> List[str]:
         return []
 

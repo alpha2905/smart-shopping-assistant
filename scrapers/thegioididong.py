@@ -2,7 +2,7 @@ import sys
 import os
 import json
 import logging
-from typing import List
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
 
@@ -83,7 +83,7 @@ class TheGioiDiDongScraper(BaseScraper):
 
         return products
 
-    def crawl_all_dtdd(self, max_products: int = None) -> List[Product]:
+    def crawl_all_dtdd(self, max_products: Optional[int] = None) -> List[Product]:
         """
         Cào TẤT CẢ sản phẩm điện thoại từ trang danh mục /dtdd của TGDD.
         Không cần từ khóa tìm kiếm — cào hết tất cả sản phẩm có link /dtdd/.
@@ -204,6 +204,49 @@ class TheGioiDiDongScraper(BaseScraper):
             page.close()
 
         return products
+
+    def scrape_price_from_url(self, product_url: str) -> Optional[Product]:
+        """
+        Cào tên và giá từ một trang sản phẩm cụ thể của Thế Giới Di Động.
+        """
+        page = self.browser_manager.new_page()
+        try:
+            if not safe_goto(page, product_url, timeout=45000):
+                logger.warning(f"[{self.site_name}] Không thể tải trang sản phẩm: {product_url}")
+                return None
+
+            # Chờ cho tên sản phẩm và giá xuất hiện
+            page.wait_for_selector("h1, .box-price-present", timeout=15000)
+
+            name_el = page.query_selector("h1")
+            name = name_el.inner_text().strip() if name_el else ""
+
+            price_el = page.query_selector(".box-price-present")
+            price = price_el.inner_text().strip() if price_el else "Liên hệ"
+            
+            img_el = page.query_selector(".gallery-picture img")
+            image_url = ""
+            if img_el:
+                src = img_el.get_attribute("src")
+                if src and src.startswith("http"):
+                    image_url = src
+
+            if not name:
+                logger.warning(f"[{self.site_name}] Không tìm thấy tên sản phẩm tại {product_url}")
+                return None
+
+            return Product(
+                name=name,
+                price=price,
+                image_url=image_url,
+                product_url=product_url,
+                source=self.site_name
+            )
+        except Exception as e:
+            logger.error(f"[{self.site_name}] Lỗi khi cào giá từ {product_url}: {e}")
+            return None
+        finally:
+            page.close()
 
     def extract_product_info(self, page: Page, query: str, max_products: int) -> List[Product]:
         # ... (Giữ nguyên logic của bạn tại đây) ...

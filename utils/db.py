@@ -167,6 +167,41 @@ def get_product_comments(product_url: str, source: str) -> List[str]:
         return []
     return doc.get("comments", [])
 
+def get_all_product_urls_by_source() -> Dict[str, List[str]]:
+    """
+    Lấy tất cả các URL sản phẩm duy nhất từ collection 'products',
+    nhóm chúng theo 'source'.
+    Hàm này dùng để phục vụ việc cập nhật giá hàng loạt.
+    """
+    logger.info("Đang truy vấn tất cả URL sản phẩm duy nhất từ DB...")
+    pipeline = [
+        {
+            # Chỉ lấy các document có product_url và source hợp lệ
+            "$match": {
+                "product_url": {"$exists": True, "$ne": ""},
+                "source": {"$exists": True, "$ne": ""}
+            }
+        },
+        {
+            # Nhóm theo source và tạo một set các URL để đảm bảo tính duy nhất
+            "$group": {
+                "_id": "$source",
+                "urls": {"$addToSet": "$product_url"}
+            }
+        },
+        {
+            # Sắp xếp theo tên source
+            "$sort": {
+                "_id": 1
+            }
+        }
+    ]
+    results = get_collection().aggregate(pipeline)
+    
+    urls_by_source = {item['_id']: item['urls'] for item in results}
+    total_urls = sum(len(urls) for urls in urls_by_source.values())
+    logger.info(f"Đã tìm thấy {total_urls} URL từ {len(urls_by_source)} sàn trong DB để cập nhật giá.")
+    return urls_by_source
 
 def get_all_products() -> List[Dict[str, Any]]:
     """Return latest snapshot of all tracked products with their current price and comments."""
