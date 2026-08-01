@@ -174,42 +174,35 @@ def wait_for_page_load(page: Page, timeout: int = 15000) -> None:
 
 
 def safe_goto(page: Page, url: str, timeout: int = 45000, wait_until: str = "domcontentloaded") -> bool:
-    """Navigate to URL with error handling and retry logic.
-    
-    For 403 errors, try alternate navigation strategies:
-    - Use commit instead of full load
-    - Add random delays between retries
-    - Try with different navigation strategy
-    """
+    """Navigate to URL with error handling and systematic retry logic."""
     max_retries = 3
+    # Different strategies to try on failure, starting with the default.
+    wait_strategies = [wait_until, "load", "commit"]
+
     for attempt in range(max_retries):
+        current_wait_strategy = wait_strategies[attempt % len(wait_strategies)]
         try:
-            response = page.goto(url, wait_until=wait_until, timeout=timeout)
+            # On retries, add a random delay
+            if attempt > 0:
+                delay = random.randint(2500, 6000)
+                logger.info(f"Retrying ({attempt}/{max_retries}) for {url} after {delay}ms delay using strategy '{current_wait_strategy}'...")
+                page.wait_for_timeout(delay)
+            
+            response = page.goto(url, wait_until=current_wait_strategy, timeout=timeout)
+            
             if response and response.status < 400:
+                # Success
                 wait_for_page_load(page, timeout=min(timeout, 15000))
                 return True
-            elif response and response.status == 403:
-                # 403 means blocked - try with "commit" strategy
-                logger.warning(f"Attempt {attempt + 1}: Got 403 for {url}, trying alternate navigation...")
-                # Small delay to avoid rate limiting
-                page.wait_for_timeout(2000)
-                # Try with commit navigation
-                response2 = page.goto(url, wait_until="commit", timeout=timeout)
-                if response2 and response2.status < 400:
-                    wait_for_page_load(page, timeout=min(timeout, 15000))
-                    return True
-                # Try with load state
-                page.wait_for_timeout(3000)
-                response3 = page.goto(url, wait_until="load", timeout=timeout)
-                if response3 and response3.status < 400:
-                    wait_for_page_load(page, timeout=min(timeout, 15000))
-                    return True
             else:
-                logger.warning(f"Attempt {attempt + 1}: Got status {response.status if response else 'None'} for {url}")
+                status = response.status if response else 'N/A'
+                logger.warning(f"Attempt {attempt + 1}/{max_retries}: Got HTTP {status} for {url} with strategy '{current_wait_strategy}'")
+                
         except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} failed for {url}: {e}")
+            logger.warning(f"Attempt {attempt + 1}/{max_retries} failed for {url} with strategy '{current_wait_strategy}': {e.__class__.__name__}")
             if attempt == max_retries - 1:
-                return False
+                 logger.error(f"All retries failed for {url}. Last error: {e}", exc_info=False)
+
     return False
 
 

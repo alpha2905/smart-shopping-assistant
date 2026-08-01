@@ -43,29 +43,36 @@ SOURCE_TO_SCRAPER = {
     "Thế Giới Di Động": TheGioiDiDongScraper,
 }
 
-def scrape_and_update_price(scraper_class, url: str) -> Optional[Dict[str, Any]]:
+def scrape_urls(scraper_class, urls):
     """
-    Hàm worker để cào một URL duy nhất, sử dụng một instance trình duyệt riêng.
-    Được thiết kế để an toàn khi chạy đa luồng (thread-safe).
+    Một BrowserManager xử lý nhiều URL.
     """
-    product_data = None
-    try:
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = scraper_class(browser_manager)
-            if hasattr(scraper, 'scrape_price_from_url') and callable(getattr(scraper, 'scrape_price_from_url')):
+    results = []
+
+    with BrowserManager(headless=True) as browser_manager:
+        scraper = scraper_class(browser_manager)
+
+        for url in urls:
+            try:
                 product = scraper.scrape_price_from_url(url)
+
                 if product:
-                    product_data = {
-                        "name": product.name, "price": product.price, "image_url": product.image_url,
-                        "product_url": product.product_url, "source": product.source,
-                    }
-                    logger.info(f"  [OK] {product.source}: {product.price} - {product.name[:50]}...")
-            else:
-                logger.warning(f"Scraper {scraper_class.__name__} thiếu phương thức 'scrape_price_from_url'.")
-    except Exception as e:
-        logger.error(f"Lỗi khi cào URL {url} với {scraper_class.__name__}: {e}", exc_info=False)
-    
-    return product_data
+                    results.append({
+                        "name": product.name,
+                        "price": product.price,
+                        "image_url": product.image_url,
+                        "product_url": product.product_url,
+                        "source": product.source,
+                    })
+
+                    logger.info(
+                        f"[OK] {product.source}: {product.price} - {product.name[:50]}..."
+                    )
+
+            except Exception as e:
+                logger.error(f"{url}: {e}", exc_info=False)
+
+    return results
 
 def main():
     """
@@ -86,17 +93,37 @@ def main():
 
     # 2. Cào giá song song. Mỗi luồng sẽ tạo BrowserManager riêng để đảm bảo thread-safety.
     # Giới hạn số luồng để tránh quá tải tài nguyên (RAM/CPU).
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         futures = []
+
         for source, urls in urls_by_source.items():
+
             scraper_class = SOURCE_TO_SCRAPER.get(source)
+
             if not scraper_class:
-                logger.warning(f"Không tìm thấy scraper cho nguồn: '{source}'. Bỏ qua {len(urls)} URL.")
                 continue
-            
-            logger.info(f"Đưa {len(urls)} URL của '{source}' vào hàng đợi cào dữ liệu...")
-            for url in urls:
-                futures.append(executor.submit(scrape_and_update_price, scraper_class, url))
+
+            logger.info(
+                f"Queue {len(urls)} URL của {source}"
+            )
+
+            futures.append(
+                executor.submit(
+                    scrape_urls,
+                    scraper_class,
+                    urls
+                )
+            )
+
+        for future in as_completed(futures):
+
+            try:
+                products = future.result()
+
+                all_new_products_data.extend(products)
+
+            except Exception as e:
+                logger.error(e)
 
         # 3. Thu thập kết quả khi các tác vụ hoàn thành
         for future in as_completed(futures):
