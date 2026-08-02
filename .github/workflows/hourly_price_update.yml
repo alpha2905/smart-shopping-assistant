@@ -28,11 +28,14 @@ jobs:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-crawler
 
+      - name: Get Playwright version
+        run: echo "PLAYWRIGHT_VERSION=$(python -c 'import importlib.metadata; print(importlib.metadata.version("playwright"))')" >> $GITHUB_ENV
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: pw-${{ runner.os }}-playwright
+          key: pw-${{ runner.os }}-${{ env.PLAYWRIGHT_VERSION }}
 
       - name: Install dependencies
         run: |
@@ -45,7 +48,6 @@ jobs:
       - name: Run hourly price update script
         env:
           PYTHONUNBUFFERED: "1"
-          PLAYWRIGHT_BROWSERS_PATH: "0"
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           MONGO_DB: ${{ secrets.MONGO_DB }}
         run: python scripts/update_prices.py
