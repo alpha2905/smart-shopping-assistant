@@ -21,14 +21,18 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-MONGO_URI = os.environ.get(
-    "MONGODB_URI",
-    os.environ.get(
-        "MONGO_URI",
-        "mongodb+srv://22050040_db_user:Accnam55@giasanpham.uqyaw1p.mongodb.net/?appName=GiaSanPham",
-    ),
+def _env_or_default(name, default):
+    """Read env var; empty string counts as unset."""
+    value = os.environ.get(name, "").strip()
+    return value if value else default
+
+
+MONGO_URI = (
+    _env_or_default("MONGODB_URI", "")
+    or _env_or_default("MONGO_URI", "")
+    or "mongodb+srv://22050040_db_user:Accnam55@giasanpham.uqyaw1p.mongodb.net/?appName=GiaSanPham"
 )
-MONGO_DB = os.environ.get("MONGO_DB", "price_tracker")
+MONGO_DB = _env_or_default("MONGO_DB", "price_tracker")
 
 
 def parse_price(price: str) -> int:
