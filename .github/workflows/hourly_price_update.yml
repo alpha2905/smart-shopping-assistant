@@ -1,15 +1,18 @@
-# .github/workflows/hourly_price_update.yml
 name: Hourly Price Update
 
 on:
   schedule:
-    # Chạy vào đầu mỗi giờ
     - cron: '0 * * * *'
-  workflow_dispatch: # Cho phép chạy thủ công từ tab Actions
+  workflow_dispatch:
+
+concurrency:
+  group: hourly-price-update
+  cancel-in-progress: false
 
 jobs:
   update-prices:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -17,19 +20,32 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10' # Hoặc phiên bản python của dự án
+          python-version: '3.10'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-crawler
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-playwright
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt # Giả sử bạn có file requirements.txt
+          pip install -r requirements-crawler.txt
 
       - name: Install Playwright browsers
-        run: python -m playwright install --with-deps
+        run: python -m playwright install --with-deps chromium
 
       - name: Run hourly price update script
         env:
-          # Lưu chuỗi kết nối MongoDB của bạn dưới dạng secret trong repo GitHub
-          # Settings -> Secrets and variables -> Actions -> New repository secret
+          PYTHONUNBUFFERED: "1"
+          PLAYWRIGHT_BROWSERS_PATH: "0"
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGO_DB: ${{ secrets.MONGO_DB }}
         run: python scripts/update_prices.py

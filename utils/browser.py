@@ -25,11 +25,12 @@ logger = logging.getLogger(__name__)
 class BrowserManager:
     """Manages Playwright browser lifecycle and provides page instances."""
 
-    def __init__(self, headless: bool = True, timeout: int = 45000):
+    def __init__(self, headless: bool = True, timeout: int = 20000):
         self.headless = headless
         self.timeout = timeout
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
+        self._context = None
 
     def __enter__(self):
         self._playwright = sync_playwright().start()
@@ -58,22 +59,9 @@ class BrowserManager:
             args=launch_args,
             env={"LANG": "vi_VN.UTF-8", "LC_ALL": "vi_VN.UTF-8"}
         )
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._browser:
-            self._browser.close()
-        if self._playwright:
-            self._playwright.stop()
-
-    def new_page(self) -> Page:
-        """Create a new browser page with random user-agent and anti-detection settings."""
-        selected_user_agent = random.choice(USER_AGENTS)
-        selected_viewport = random.choice(VIEWPORT_SIZES)
-
-        page = self._browser.new_page(
-            user_agent=selected_user_agent,
-            viewport=selected_viewport,
+        self._context = self._browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport=random.choice(VIEWPORT_SIZES),
             locale="vi-VN",
             timezone_id="Asia/Ho_Chi_Minh",
             no_viewport=False,
@@ -89,7 +77,27 @@ class BrowserManager:
                 "Cache-Control": "max-age=0",
             },
         )
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._context:
+            self._context.close()
+        if self._browser:
+            self._browser.close()
+        if self._playwright:
+            self._playwright.stop()
+
+    def new_page(self) -> Page:
+        """Create a new browser page with random user-agent and anti-detection settings."""
+        page = self._context.new_page()
         page.set_default_timeout(self.timeout)
+
+        # Block unnecessary resources to speed up page loading
+        page.route("**/*", lambda route: (
+            route.abort()
+            if route.request.resource_type in {"font", "media", "image"}
+            else route.continue_()
+        ))
 
         page.add_init_script("""
             // Override navigator.webdriver (Playwright already does this, but be safe)

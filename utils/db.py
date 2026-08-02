@@ -8,22 +8,43 @@ Single collection "products":
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 
 from dotenv import load_dotenv
 from pymongo import MongoClient, ASCENDING, DESCENDING
+from bson import ObjectId
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 MONGO_URI = os.environ.get(
-    "MONGO_URI",
-    "mongodb+srv://22050040_db_user:Accnam55@giasanpham.uqyaw1p.mongodb.net/?appName=GiaSanPham",
+    "MONGODB_URI",
+    os.environ.get(
+        "MONGO_URI",
+        "mongodb+srv://22050040_db_user:Accnam55@giasanpham.uqyaw1p.mongodb.net/?appName=GiaSanPham",
+    ),
 )
 MONGO_DB = os.environ.get("MONGO_DB", "price_tracker")
+
+
+def parse_price(price: str) -> int:
+    """
+    "29.990.000₫" -> 29990000
+    "Liên hệ" -> 0
+    """
+    if not price:
+        return 0
+
+    digits = re.sub(r"[^\d]", "", str(price))
+
+    if not digits:
+        return 0
+
+    return int(digits)
 
 _client: MongoClient = None
 
@@ -51,8 +72,26 @@ def init_db() -> None:
     col.create_index([("query", ASCENDING)])
     col.create_index([("last_scraped_at", DESCENDING)])
     # Index trên mảng price_history.scraped_at để query nhanh
+    col.create_index("name")
+    col.create_index("source")
+    col.create_index("price_value")
+    col.create_index("average_price")
     col.create_index([("price_history.scraped_at", DESCENDING)])
     logger.info("MongoDB indexes initialized in database '%s'", MONGO_DB)
+
+def init_forecast_collection() -> None:
+    """Create indexes for the 'forecasts' collection."""
+    col = get_db()["forecasts"]
+    col.create_index([("product_url", ASCENDING), ("source", ASCENDING)])
+    col.create_index([("predict_date", DESCENDING)])
+    logger.info("MongoDB 'forecasts' collection indexes initialized")
+
+def init_sentiment_collection() -> None:
+    """Create indexes for the 'sentiments' collection."""
+    col = get_db()["sentiments"]
+    col.create_index([("product_url", ASCENDING), ("source", ASCENDING)], unique=True)
+    col.create_index([("created_at", DESCENDING)])
+    logger.info("MongoDB 'sentiments' collection indexes initialized")
 
 
 def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
@@ -68,40 +107,82 @@ def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
         source = prod.get("source", "")
         name = prod.get("name", "")
         image_url = prod.get("image_url", "")
-        price = prod.get("price", "")
+        price_str = prod.get("price", "Liên hệ")
         comments = prod.get("comments", [])
 
         if not product_url or not source:
             continue
 
+        new_price_value = parse_price(price_str)
+
+        # Find existing doc to check last price and get full history
+        existing_doc = col.find_one(
+            {"product_url": product_url, "source": source},
+            {"price_history": 1}
+        )
+
+        history = []
+        last_price_value = 0
+        last_scraped_at = None
+        if existing_doc:
+            history = existing_doc.get("price_history", [])
+            if history:
+                last_entry = history[-1]
+                last_price_value = last_entry.get('price_value', parse_price(last_entry.get('price')))
+                last_scraped_at = last_entry.get('scraped_at')
+
+        # LUÔN ghi snapshot giá (kể cả khi không đổi) để tích lũy dữ liệu train LSTM.
+        # Chỉ bỏ qua nếu entry cuối có CÙNG giá và được ghi trong 55 phút gần nhất
+        # (tránh trùng lặp do retry/refresh cùng giờ).
+        should_append = True
+        if last_scraped_at is not None and last_price_value == new_price_value:
+            if isinstance(last_scraped_at, datetime):
+                if now - last_scraped_at < timedelta(minutes=55):
+                    should_append = False
+        
+        # Prepare fields for the $set operation
         set_fields = {
             "name": name,
             "image_url": image_url,
-            "price": price,
+            "price": price_str,
+            "price_value": new_price_value,
             "query": query,
             "last_scraped_at": now,
         }
 
-        # Chỉ cập nhật comments khi scraper thực sự cào được comment mới
-        # (tránh ghi đè comment cũ bằng list rỗng khi scraper không lấy comment)
         if comments:
             set_fields["comments"] = comments
             set_fields["comments_updated_at"] = now
             set_fields["comments_count"] = len(comments)
 
-        col.update_one(
-            {"product_url": product_url, "source": source},
-            {
-                "$set": set_fields,
-                "$push": {
-                    "price_history": {
-                        "price": price,
-                        "scraped_at": now,
-                    }
-                },
-            },
-            upsert=True,
-        )
+        # Calculate and add statistics
+        price_values = [h.get('price_value', parse_price(h.get('price'))) for h in history if h.get('price_value', parse_price(h.get('price'))) > 0]
+        price_values.append(new_price_value)
+        
+        # Only calculate stats if there are valid prices
+        if price_values:
+            set_fields["latest_price"] = new_price_value
+            set_fields["lowest_price"] = min(price_values)
+            set_fields["highest_price"] = max(price_values)
+            set_fields["average_price"] = int(sum(price_values) / len(price_values))
+
+        # Construct the final update operation
+        update_op = {"$set": set_fields}
+        if should_append:
+            price_change_amount = new_price_value - last_price_value
+            price_change_percent = (price_change_amount / last_price_value * 100) if last_price_value > 0 else 0
+            update_op["$push"] = {
+                "price_history": {
+                    "price": price_str,
+                    "price_value": new_price_value,
+                    "scraped_at": now,
+                    "previous_price": last_price_value,
+                    "price_change": price_change_amount,
+                    "price_change_percent": round(price_change_percent, 2)
+                }
+            }
+
+        col.update_one({"product_url": product_url, "source": source}, update_op, upsert=True)
 
     logger.info(
         "Saved %d products for query '%s' (%d new price entries)",
@@ -167,6 +248,133 @@ def get_product_comments(product_url: str, source: str) -> List[str]:
     if not doc or "comments" not in doc:
         return []
     return doc.get("comments", [])
+
+def get_price_statistics(product_url: str, source: str) -> Optional[Dict[str, Any]]:
+    """
+    Get pre-calculated price statistics for a product.
+    """
+    doc = get_collection().find_one(
+        {"product_url": product_url, "source": source},
+        {
+            "_id": 0,
+            "latest_price": 1,
+            "lowest_price": 1,
+            "highest_price": 1,
+            "average_price": 1,
+            "price_history": {"$slice": -1}  # Get the last history entry for change info
+        }
+    )
+    if not doc:
+        return None
+
+    stats = {
+        "current_price": doc.get("latest_price"),
+        "lowest_price": doc.get("lowest_price"),
+        "highest_price": doc.get("highest_price"),
+        "average_price": doc.get("average_price"),
+    }
+
+    # Add change info from the last history entry
+    history = doc.get("price_history", [])
+    if history:
+        last_entry = history[0]
+        stats["price_change"] = last_entry.get("price_change")
+        stats["price_change_percent"] = last_entry.get("price_change_percent")
+
+    return stats
+
+def save_forecasts(
+    product_url: str,
+    source: str,
+    forecasts: List[Dict[str, Any]],
+    metrics: Dict[str, Any]
+) -> None:
+    """Saves a batch of forecasts to the 'forecasts' collection."""
+    col = get_db()["forecasts"]
+    now = datetime.utcnow()
+    
+    prediction_updated_at = metrics.get("prediction_updated_at", now)
+    docs_to_insert = []
+    for forecast in forecasts:
+        docs_to_insert.append({
+            "product_url": product_url,
+            "source": source,
+            "predict_date": forecast["date"],
+            "forecast_price": forecast["price"],
+            "model": "LSTM",
+            "mae": metrics.get("mae"),
+            "rmse": metrics.get("rmse"),
+            "mape": metrics.get("mape"),
+            "prediction_updated_at": prediction_updated_at,
+            "verified": False, # Mark as not yet verified against actual price
+        })
+
+    if docs_to_insert:
+        # Remove old forecasts for this product before inserting new ones
+        col.delete_many({"product_url": product_url, "source": source})
+        col.insert_many(docs_to_insert)
+        logger.info(f"Saved {len(docs_to_insert)} new forecasts for {source} - {product_url}")
+
+def get_forecasts(product_url: str, source: str) -> List[Dict[str, Any]]:
+    """Gets all forecasts for a product, sorted by date."""
+    col = get_db()["forecasts"]
+    cursor = col.find(
+        {"product_url": product_url, "source": source},
+        {"_id": 0, "predict_date": 1, "forecast_price": 1}
+    ).sort("predict_date", ASCENDING)
+    return list(cursor)
+
+def get_unverified_forecasts() -> List[Dict[str, Any]]:
+    """Gets all forecasts that have not been verified and whose prediction date is in the past."""
+    col = get_db()["forecasts"]
+    cursor = col.find({
+        "verified": False,
+        "predict_date": {"$lt": datetime.utcnow()}
+    })
+    return list(cursor)
+
+def mark_forecasts_as_verified(forecast_ids: List[ObjectId]) -> None:
+    """Marks a list of forecasts as verified."""
+    if not forecast_ids:
+        return
+    col = get_db()["forecasts"]
+    col.update_many(
+        {"_id": {"$in": forecast_ids}},
+        {"$set": {"verified": True}}
+    )
+
+def save_sentiment_result(product_url: str, source: str, result: Dict[str, Any]) -> None:
+    """
+    Upserts the sentiment analysis result for a product into the 'sentiments' collection.
+    """
+    col = get_db()["sentiments"]
+    now = datetime.utcnow()
+
+    update_payload = {
+        "$set": {
+            "product_url": product_url,
+            "source": source,
+            "positive": result.get("positive"),
+            "neutral": result.get("neutral"),
+            "negative": result.get("negative"),
+            "sentiment": result.get("sentiment"),
+            "sentiment_score": result.get("sentiment_score"),
+            "comment_count": result.get("comment_count"),
+            "model": "PhoBERT",
+            "created_at": now,
+        }
+    }
+    col.update_one(
+        {"product_url": product_url, "source": source},
+        update_payload,
+        upsert=True
+    )
+    logger.info(f"Saved sentiment analysis for {source} - {product_url}")
+
+def get_sentiment_result(product_url: str, source: str) -> Optional[Dict[str, Any]]:
+    """Retrieves the sentiment analysis result for a product."""
+    col = get_db()["sentiments"]
+    return col.find_one({"product_url": product_url, "source": source}, {"_id": 0})
 
 def get_all_product_urls_by_source() -> Dict[str, List[str]]:
     """
@@ -289,80 +497,6 @@ def get_products_with_price_history(min_history: int = 3) -> List[Dict[str, Any]
 
     results.sort(key=lambda x: x.get("price_history_count", 0), reverse=True)
     return results
-
-
-def save_prediction(product_url: str, source: str, prediction: Dict[str, Any]) -> None:
-    """Cache LSTM prediction in the product document.
-    It tries to update in the dedicated source collection first, then the main 'products' collection.
-    """
-    db = get_db()
-
-    # Convert numpy types to native Python types for JSON serialization
-    def convert_numpy(obj):
-        if isinstance(obj, dict):
-            return {k: convert_numpy(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [convert_numpy(v) for v in obj]
-        elif hasattr(obj, "item"):  # numpy scalars
-            return obj.item()
-        return obj
-
-    cleaned_prediction = convert_numpy(prediction)
-
-    update_payload = {"$set": {
-        "prediction": cleaned_prediction,
-        "prediction_updated_at": datetime.utcnow(),
-    }}
-
-    # Mapping from source name to collection name
-    source_to_collection_map = {
-        "FPT Shop": "fpt",
-        "Thế Giới Di Động": "tgdd",
-        "CellphoneS": "cellphones",
-        "Hoàng Hà Mobile": "hoangha",
-        "Di Động Việt": "didongviet",
-        "Viettel Store": "viettelstore",
-        "Clickbuy": "clickbuy",
-        "MobileCity": "mobilecity",
-    }
-
-    # 1. Try to update in dedicated collection first
-    updated = False
-    collection_name = source_to_collection_map.get(source)
-    if collection_name:
-        col = db[collection_name]
-        result = col.update_one(
-            {"product_url": product_url, "source": source},
-            update_payload,
-        )
-        if result.matched_count > 0:
-            updated = True
-    
-    # 2. If not found or not updated, try the main 'products' collection
-    if not updated:
-        col = get_collection() # main 'products' collection
-        col.update_one(
-            {"product_url": product_url, "source": source},
-            update_payload,
-        )
-
-    logger.info("Cached prediction for %s/%s", source, product_url[:50])
-
-
-def get_prediction(product_url: str, source: str) -> Optional[Dict[str, Any]]:
-    """Get cached prediction for a product, or None if not cached."""
-    col = get_collection()
-    doc = col.find_one(
-        {"product_url": product_url, "source": source},
-        {"prediction": 1, "prediction_updated_at": 1, "_id": 0},
-    )
-    if not doc or "prediction" not in doc:
-        return None
-    return {
-        "prediction": doc["prediction"],
-        "prediction_updated_at": doc.get("prediction_updated_at"),
-    }
-
 
 def get_tgdd_collection():
     """Return the 'tgdd' collection (separate from 'products')."""

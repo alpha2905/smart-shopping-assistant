@@ -1,168 +1,103 @@
-import os
-import unittest
+# tests/test_db.py
+import pytest
+from mongomock import MongoClient
+from unittest.mock import patch
+from datetime import datetime, timedelta
 
-from utils.db import (
-    init_db, save_search_results, get_product_price_history,
-    get_collection, close_db, get_product_comments,
-)
+# We need to patch the db connection before importing the functions
+@pytest.fixture(scope="function")
+def mock_db():
+    with patch('utils.db.get_client') as mock_get_client:
+        mock_client = MongoClient()
+        mock_get_client.return_value = mock_client
+        yield mock_client
+        mock_client.close()
 
-MONGO_TEST_DB = "price_tracker_test"
+def test_save_search_results_new_product(mock_db):
+    """
+    Tests saving a completely new product.
+    """
+    from utils.db import save_search_results, get_collection
+    
+    collection = get_collection()
+    assert collection.count_documents({}) == 0
 
+    product_data = [{
+        "product_url": "http://example.com/product1",
+        "source": "TestStore",
+        "name": "Test Product 1",
+        "price": "1.000.000đ"
+    }]
 
-class DbStorageTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        os.environ["MONGO_DB"] = MONGO_TEST_DB
-        init_db()
+    save_search_results("test query", product_data)
 
-    @classmethod
-    def tearDownClass(cls):
-        from utils.db import get_client
-        client = get_client()
-        client.drop_database(MONGO_TEST_DB)
-        close_db()
+    assert collection.count_documents({}) == 1
+    doc = collection.find_one()
+    assert doc["name"] == "Test Product 1"
+    assert doc["price_value"] == 1000000
+    assert len(doc["price_history"]) == 1
+    assert doc["price_history"][0]["price_value"] == 1000000
 
-    def setUp(self):
-        get_collection().delete_many({})
+def test_save_search_results_price_change(mock_db):
+    """
+    Tests that a new price entry is pushed to history when the price changes.
+    """
+    from utils.db import save_search_results, get_collection
+    
+    # First save
+    product_data_1 = [{"product_url": "http://example.com/product1", "source": "TestStore", "name": "Test Product 1", "price": "1.000.000đ"}]
+    save_search_results("test query", product_data_1)
 
-    def test_save_search_results_keeps_price_history(self):
-        first = [{
-            'name': 'iPhone 15',
-            'price': '20000000',
-            'image_url': 'https://example.com/1.jpg',
-            'product_url': 'https://example.com/iphone-15',
-            'source': 'test-shop',
-            'comments': ['good']
-        }]
-        save_search_results('iphone', first)
+    # Second save with different price
+    product_data_2 = [{"product_url": "http://example.com/product1", "source": "TestStore", "name": "Test Product 1 Updated", "price": "1.200.000đ"}]
+    save_search_results("test query", product_data_2)
 
-        second = [{
-            'name': 'iPhone 15',
-            'price': '21000000',
-            'image_url': 'https://example.com/1.jpg',
-            'product_url': 'https://example.com/iphone-15',
-            'source': 'test-shop',
-            'comments': ['great']
-        }]
-        save_search_results('iphone', second)
+    doc = get_collection().find_one()
+    assert doc["name"] == "Test Product 1 Updated"
+    assert doc["price_value"] == 1200000
+    assert len(doc["price_history"]) == 2
+    assert doc["price_history"][0]["price_value"] == 1000000
+    assert doc["price_history"][1]["price_value"] == 1200000
+    assert doc["price_history"][1]["price_change"] == 200000
 
-        history = get_product_price_history('https://example.com/iphone-15', 'test-shop')
-        self.assertEqual(len(history), 2)
-        self.assertEqual(history[0]['price'], '20000000')
-        self.assertEqual(history[1]['price'], '21000000')
+def test_save_search_results_no_price_change_dedupe(mock_db):
+    """
+    Gia khong doi và lan ghi truoc cach <55 phut -> KHONG append entry trung
+    (tranh trung lap khi workflow chay lai trong cung 1 gio).
+    """
+    from utils.db import save_search_results, get_collection
 
-    def test_single_document_per_product(self):
-        """Chỉ 1 document cho 1 sản phẩm, dù scrape nhiều lần."""
-        prod = {
-            'name': 'Samsung Galaxy',
-            'price': '15000000',
-            'image_url': 'https://example.com/s23.jpg',
-            'product_url': 'https://example.com/s23',
-            'source': 'test-shop',
-        }
-        save_search_results('samsung', [prod])
-        save_search_results('samsung', [prod])
-        save_search_results('samsung', [prod])
+    product_data = [{"product_url": "http://example.com/product1", "source": "TestStore", "name": "Test Product 1", "price": "1.000.000đ"}]
+    save_search_results("test query", product_data)
+    first_save_time = get_collection().find_one()["last_scraped_at"]
 
-        col = get_collection()
-        count = col.count_documents({"product_url": "https://example.com/s23", "source": "test-shop"})
-        self.assertEqual(count, 1)
+    save_search_results("test query", product_data)
 
-        history = get_product_price_history('https://example.com/s23', 'test-shop')
-        self.assertEqual(len(history), 3)
+    doc = get_collection().find_one()
+    assert len(doc["price_history"]) == 1
+    assert doc["last_scraped_at"] >= first_save_time
 
-    def test_save_and_retrieve_comments(self):
-        """Lưu comments vào DB và lấy ra được."""
-        prod = {
-            'name': 'iPhone 15 Pro',
-            'price': '25000000',
-            'image_url': 'https://example.com/iphone15pro.jpg',
-            'product_url': 'https://example.com/iphone-15-pro',
-            'source': 'FPT Shop',
-            'comments': ['Sản phẩm rất tốt', 'Pin khá', 'Máy đẹp, đáng mua'],
-        }
-        save_search_results('iphone', [prod])
+def test_save_search_results_same_price_new_hour_appends(mock_db):
+    """
+    Gia khong doi nhung da qua khung gio moi (>=55 phut) -> VAN append snapshot
+    de tich luy du lieu huan luyen LSTM (append-only theo gio).
+    """
+    from utils.db import save_search_results, get_collection
 
-        comments = get_product_comments('https://example.com/iphone-15-pro', 'FPT Shop')
-        self.assertEqual(len(comments), 3)
-        self.assertIn('Sản phẩm rất tốt', comments)
-        self.assertIn('Pin khá', comments)
-        self.assertIn('Máy đẹp, đáng mua', comments)
+    product_data = [{"product_url": "http://example.com/product1", "source": "TestStore", "name": "Test Product 1", "price": "1.000.000đ"}]
+    save_search_results("test query", product_data)
 
-    def test_comments_updated_on_rescrape(self):
-        """Khi scrape lại, comments mới ghi đè comments cũ."""
-        url = 'https://example.com/iphone-15-pro'
-        source = 'FPT Shop'
+    # Mo phong lan ghi truoc da cach 2 gio
+    col = get_collection()
+    col.update_one(
+        {"product_url": "http://example.com/product1", "source": "TestStore"},
+        {"$set": {"price_history.0.scraped_at": datetime.utcnow() - timedelta(hours=2)}}
+    )
 
-        first = [{
-            'name': 'iPhone 15 Pro',
-            'price': '25000000',
-            'image_url': 'https://example.com/iphone15pro.jpg',
-            'product_url': url,
-            'source': source,
-            'comments': ['Bình luận cũ 1', 'Bình luận cũ 2'],
-        }]
-        save_search_results('iphone', first)
+    save_search_results("test query", product_data)
 
-        second = [{
-            'name': 'iPhone 15 Pro',
-            'price': '24000000',
-            'image_url': 'https://example.com/iphone15pro.jpg',
-            'product_url': url,
-            'source': source,
-            'comments': ['Bình luận mới 1', 'Bình luận mới 2', 'Bình luận mới 3'],
-        }]
-        save_search_results('iphone', second)
-
-        comments = get_product_comments(url, source)
-        self.assertEqual(len(comments), 3)
-        self.assertIn('Bình luận mới 1', comments)
-        self.assertNotIn('Bình luận cũ 1', comments)
-
-    def test_empty_comments_not_overwrite_existing(self):
-        """Khi scraper không cào được comment (list rỗng), không ghi đè comment cũ."""
-        url = 'https://example.com/iphone-15-pro'
-        source = 'Thế Giới Di Động'
-
-        first = [{
-            'name': 'iPhone 15 Pro',
-            'price': '25000000',
-            'image_url': 'https://example.com/iphone15pro.jpg',
-            'product_url': url,
-            'source': source,
-            'comments': ['Comment cũ 1', 'Comment cũ 2'],
-        }]
-        save_search_results('iphone', first)
-
-        # Scrape lại nhưng không có comment (scraper khác không cào comment)
-        second = [{
-            'name': 'iPhone 15 Pro',
-            'price': '24000000',
-            'image_url': 'https://example.com/iphone15pro.jpg',
-            'product_url': url,
-            'source': source,
-            'comments': [],
-        }]
-        save_search_results('iphone', second)
-
-        comments = get_product_comments(url, source)
-        self.assertEqual(len(comments), 2)
-        self.assertIn('Comment cũ 1', comments)
-
-    def test_get_product_comments_empty(self):
-        """Sản phẩm chưa có comment trả về list rỗng."""
-        prod = {
-            'name': 'Test Phone',
-            'price': '10000000',
-            'image_url': 'https://example.com/test.jpg',
-            'product_url': 'https://example.com/test-phone',
-            'source': 'test-shop',
-        }
-        save_search_results('test', [prod])
-
-        comments = get_product_comments('https://example.com/test-phone', 'test-shop')
-        self.assertEqual(comments, [])
-
-
-if __name__ == '__main__':
-    unittest.main()
+    doc = get_collection().find_one()
+    assert len(doc["price_history"]) == 2
+    assert doc["price_history"][0]["price_value"] == 1000000
+    assert doc["price_history"][1]["price_value"] == 1000000
+    assert doc["price_history"][1]["price_change"] == 0

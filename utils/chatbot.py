@@ -12,7 +12,7 @@ from collections import Counter
 
 from utils.db import (
     get_all_products, get_latest_prices_for_query, get_product_price_history,
-    get_prediction, get_unique_queries,
+    get_forecasts, get_unique_queries,
 )
 from utils.search_filter import (
     filter_comparable_phones, parse_price, normalize_text, expand_query,
@@ -350,8 +350,8 @@ def handle_forecast(message: str) -> str:
     if not product_url or not source:
         return "Không thể lấy thông tin chi tiết sản phẩm để dự báo."
 
-    # Check cached prediction
-    prediction = get_prediction(product_url, source)
+    # Check for forecasts
+    forecasts = get_forecasts(product_url, source)
     history = get_product_price_history(product_url, source)
 
     response = f"📊 *Dự báo giá: {product.get('name', query)}*\n\n"
@@ -376,27 +376,36 @@ def handle_forecast(message: str) -> str:
             else:
                 response += f"  ➡️ Giá ổn định\n"
 
-    if prediction:
-        preds = prediction.get("predictions", [])
+    if forecasts:
+        preds = forecasts
         if preds:
             response += f"\n🔮 *Dự báo 7 ngày tới:*\n"
             for p in preds[:7]:
-                date_str = p.get("date", "")[:10]
-                price_str = format_price(str(int(p.get("price", 0))))
+                date_obj = p.get("predict_date")
+                date_str = date_obj.strftime("%d/%m/%Y") if date_obj else "N/A"
+                price_str = format_price(str(int(p.get("forecast_price", 0))))
                 response += f"  • {date_str}: {price_str}\n"
 
             # Trend analysis
-            first_pred = preds[0].get("price", 0)
-            last_pred = preds[-1].get("price", 0)
-            if last_pred > first_pred:
-                response += f"\n📈 *Xu hướng:* Giá có xu hướng tăng trong tuần tới."
-            elif last_pred < first_pred:
-                response += f"\n📉 *Xu hướng:* Giá có xu hướng giảm trong tuần tới."
+            current_price = 0
+            if history:
+                last_history_price = parse_price(history[-1].get("price", ""))
+                if last_history_price > 0:
+                    current_price = last_history_price
+            
+            last_pred_price = preds[-1].get("forecast_price", 0)
+
+            if current_price > 0 and last_pred_price > 0:
+                if last_pred_price > current_price * 1.01: # Increase if > 1% change
+                    response += f"\n📈 *Xu hướng:* Giá có thể tăng trong tuần tới."
+                elif last_pred_price < current_price * 0.99: # Decrease if > 1% change
+                    response += f"\n📉 *Xu hướng:* Giá có thể giảm trong tuần tới."
+                else:
+                    response += f"\n➡️ *Xu hướng:* Giá có thể sẽ ổn định."
             else:
-                response += f"\n➡️ *Xu hướng:* Giá ổn định."
+                response += "\n(Chưa đủ dữ liệu để xác định xu hướng)"
     else:
-        response += "\n⏳ Chưa có đủ dữ liệu để dự báo (cần ít nhất 3 mốc thời gian)."
-        response += "\n💡 Hãy tìm kiếm sản phẩm này vài lần để tích lũy dữ liệu!"
+        response += "\n⏳ Hiện chưa có dự báo cho sản phẩm này. Bạn có thể tạo dự báo qua API."
 
     return response
 

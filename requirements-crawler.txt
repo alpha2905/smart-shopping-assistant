@@ -1,0 +1,9 @@
+# Dependencies toi thieu cho GitHub Action cap nhat gia hang gio
+# (KHONG bao gom tensorflow/torch/transformers de tiet kiem thoi gian)
+playwright>=1.40.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+pymongo>=4.5.0
+dnspython>=2.4.0
+numpy>=1.26.0
+beautifulsoup4>=4.12.0

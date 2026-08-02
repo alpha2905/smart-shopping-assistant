@@ -1,19 +1,30 @@
 # scripts/update_prices.py
 import asyncio
-import logging
-import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Any, Optional
-
-# Thêm thư mục gốc vào sys.path
+import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import logging
+import sys
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Any, Optional, Tuple
 
-# Cấu hình logging
+# Fix Windows console encoding for Vietnamese characters
+if sys.platform == 'win32' and sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Setup logging to both file and console
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[
+        logging.FileHandler("crawler.log", encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -43,19 +54,24 @@ SOURCE_TO_SCRAPER = {
     "Thế Giới Di Động": TheGioiDiDongScraper,
 }
 
-def scrape_urls(scraper_class, urls):
+def scrape_urls(scraper_class, source_name: str, urls: List[str]) -> Tuple[str, List[Dict], int, int]:
     """
-    Một BrowserManager xử lý nhiều URL.
+    Một worker xử lý tất cả URL cho một sàn (source) cụ thể.
+    Nó sử dụng một BrowserManager (và một BrowserContext) duy nhất để cào tất cả URL,
+    giúp duy trì session và tăng hiệu quả.
+
+    Returns:
+        Tuple: (source_name, list_of_product_data, success_count, total_count)
     """
     results = []
-
+    ok_count = 0
     with BrowserManager(headless=True) as browser_manager:
         scraper = scraper_class(browser_manager)
-
         for url in urls:
+            page = None
             try:
+                page = browser_manager.new_page()
                 product = scraper.scrape_price_from_url(url)
-
                 if product:
                     results.append({
                         "name": product.name,
@@ -64,15 +80,17 @@ def scrape_urls(scraper_class, urls):
                         "product_url": product.product_url,
                         "source": product.source,
                     })
-
-                    logger.info(
-                        f"[OK] {product.source}: {product.price} - {product.name[:50]}..."
-                    )
-
+                    ok_count += 1
+                    logger.info(f"[OK] {product.source}: {product.price} - {product.name[:50]}...")
+                # Thêm delay ngẫu nhiên để tránh bị rate-limit
+                page.wait_for_timeout(random.randint(500, 1800))
             except Exception as e:
-                logger.error(f"{url}: {e}", exc_info=False)
+                logger.error("%s | %s", type(e).__name__, url, exc_info=False)
+            finally:
+                if page:
+                    page.close()
+    return source_name, results, ok_count, len(urls)
 
-    return results
 
 def main():
     """
@@ -81,65 +99,45 @@ def main():
     logger.info("🚀 Bắt đầu quy trình cập nhật giá hàng giờ...")
     init_db()
 
-    # 1. Lấy tất cả URL sản phẩm duy nhất từ DB
     urls_by_source = get_all_product_urls_by_source()
     if not urls_by_source:
         logger.info("Không tìm thấy URL sản phẩm nào trong DB. Kết thúc.")
         return
 
     all_new_products_data = []
+    summary_stats = {}
     total_urls = sum(len(urls) for urls in urls_by_source.values())
     logger.info(f"Tìm thấy {total_urls} URL duy nhất từ {len(urls_by_source)} nguồn để cập nhật.")
 
-    # 2. Cào giá song song. Mỗi luồng sẽ tạo BrowserManager riêng để đảm bảo thread-safety.
-    # Giới hạn số luồng để tránh quá tải tài nguyên (RAM/CPU).
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    # Mỗi worker (luồng) sẽ xử lý một sàn (source)
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = []
-
         for source, urls in urls_by_source.items():
-
             scraper_class = SOURCE_TO_SCRAPER.get(source)
-
             if not scraper_class:
+                logger.warning(f"Không tìm thấy scraper cho nguồn: '{source}'. Bỏ qua {len(urls)} URL.")
                 continue
-
-            logger.info(
-                f"Queue {len(urls)} URL của {source}"
-            )
-
-            futures.append(
-                executor.submit(
-                    scrape_urls,
-                    scraper_class,
-                    urls
-                )
-            )
+            logger.info(f"Đưa {len(urls)} URL của '{source}' vào hàng đợi cào dữ liệu...")
+            futures.append(executor.submit(scrape_urls, scraper_class, source, urls))
 
         for future in as_completed(futures):
-
             try:
-                products = future.result()
-
-                all_new_products_data.extend(products)
-
+                source_name, products, ok, total = future.result()
+                if products:
+                    all_new_products_data.extend(products)
+                summary_stats[source_name] = (ok, total)
             except Exception as e:
-                logger.error(e)
-
-        # 3. Thu thập kết quả khi các tác vụ hoàn thành
-        for future in as_completed(futures):
-            try:
-                result = future.result()
-                if result:
-                    all_new_products_data.append(result)
-            except Exception as e:
-                logger.error(f"Một tác vụ cào dữ liệu đã phát sinh lỗi: {e}")
+                logger.error(f"Một worker đã gặp lỗi nghiêm trọng: {e}", exc_info=True)
 
     logger.info(f"Đã cào thành công {len(all_new_products_data)} trên tổng số {total_urls} URL.")
 
-    # 4. Lưu dữ liệu giá mới vào DB
+    # In bảng tóm tắt
+    logger.info("--- Hourly Price Update Summary ---")
+    for source, (ok, total) in sorted(summary_stats.items()):
+        logger.info(f"{source:<20} {ok}/{total}")
+    logger.info("---------------------------------")
+
     if all_new_products_data:
-        # Tái sử dụng hàm save_search_results. Hàm này sẽ lưu các bản ghi mới với timestamp,
-        # tạo ra lịch sử giá mà không xóa dữ liệu cũ.
         logger.info(f"Đang lưu {len(all_new_products_data)} bản ghi giá mới vào DB...")
         save_search_results("hourly_price_update", all_new_products_data)
         logger.info("✅ Đã lưu thành công dữ liệu giá mới.")

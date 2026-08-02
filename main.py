@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # APScheduler cho tác vụ định kỳ
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -15,8 +15,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from utils.browser import BrowserManager
 from utils.db import (
     init_db, save_search_results, get_unique_queries, close_db,
-    get_product_price_history, get_products_with_price_history,
-    save_prediction, get_prediction, get_latest_prices_for_query,
+    get_product_price_history, get_products_with_price_history, get_price_statistics, get_latest_prices_for_query,
     get_product_comments,
     init_tgdd_collection, save_tgdd_products, get_all_tgdd_products,
     init_fpt_collection, save_fpt_products_incremental, get_all_fpt_products,
@@ -26,9 +25,7 @@ from utils.db import (
     init_clickbuy_collection, save_clickbuy_products, get_all_clickbuy_products,
     init_didongviet_collection, save_didongviet_products, get_all_didongviet_products,
     init_cellphones_collection, save_cellphones_products, get_all_cellphones_products,
-)
-from utils.search_filter import filter_comparable_phones
-from utils.price_predictor import train_and_predict
+    parse_price, init_forecast_collection, save_forecasts, get_forecasts, init_sentiment_collection, get_sentiment_result)
 from utils.chatbot import get_chat_response
 from utils.recommendation_engine import (
     calculate_pqs, calculate_price_statistics, get_buy_recommendation,
@@ -36,6 +33,14 @@ from utils.recommendation_engine import (
 )
 
 # Import 7 scraper
+from ai.dataset import get_price_data
+from ai.preprocess import prepare_time_series_data
+from ai.train_lstm import train_and_save_model
+from ai.predict import get_model, forecast_future_prices
+from ai.evaluate import evaluate_model_performance
+from ai.sentiment.service import analyze_and_save_product_sentiment
+
+# Import scrapers
 from scrapers.fptshop import FPTShopScraper
 from scrapers.didongviet import DiDongVietScraper
 from scrapers.clickbuy import ClickbuyScraper
@@ -188,6 +193,8 @@ def scheduled_scrape_all():
 def startup():
     """Khởi tạo DB + scheduler khi app start."""
     # Khởi tạo MongoDB indexes
+    init_sentiment_collection()
+    init_forecast_collection()
     init_db()
 
     # Schedule: scrape mỗi giờ (cả khi không có request nào)
@@ -219,21 +226,40 @@ def search_products(
     q: str = Query(..., description="Từ khóa tìm kiếm sản phẩm"),
     force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
 ):
-    # 1. Nếu không force_refresh, check DB trước → trả về ngay nếu đã có
+    now = datetime.utcnow()
+
+    # 1. Nếu không force_refresh, check cache
     if not force_refresh:
-        cached = get_latest_prices_for_query(q)
-        if cached:
-            logger.info("Query '%s' found in DB, returning %d cached products instantly", q, len(cached))
+        # Check in-memory cache first
+        cached_in_memory = _cache.get(q)
+        if cached_in_memory and now < cached_in_memory["expire_at"]:
+            logger.info("Query '%s' found in in-memory cache, returning %d products.", q, len(cached_in_memory["data"]))
             return {
                 "query": q,
-                "total": len(cached),
-                "products": cached,
+                "total": len(cached_in_memory["data"]),
+                "products": cached_in_memory["data"],
+                "cached": True,
+            }
+
+        # Check DB cache
+        cached_in_db = get_latest_prices_for_query(q)
+        if cached_in_db:
+            logger.info("Query '%s' found in DB, returning %d cached products instantly", q, len(cached_in_db))
+            # Store in in-memory cache for next time
+            _cache[q] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
+            return {
+                "query": q,
+                "total": len(cached_in_db),
+                "products": cached_in_db,
                 "cached": True,
             }
 
     # 2. Nếu chưa có trong DB (hoặc force_refresh) → scrape từ 7 sàn
-    logger.info("Query '%s' not in DB (or force_refresh), scraping from 7 stores...", q)
+    logger.info("Query '%s' not in cache (or force_refresh), scraping from 7 stores...", q)
     all_products = scrape_and_save(q)
+
+    # Store result in in-memory cache
+    _cache[q] = {"data": all_products, "expire_at": now + CACHE_TTL}
 
     return {
         "query": q,
@@ -273,18 +299,29 @@ async def search_products_stream(
       event: done    → {"total": 35, "query": "iphone", "cached": false}
       event: error   → {"message": "..."}
     """
+    now = datetime.utcnow()
 
     # 1. Check cache trước (trả về ngay nếu có)
     if not force_refresh:
-        cached = get_latest_prices_for_query(q)
-        if cached:
-            logger.info("Query '%s' found in DB, streaming %d cached products", q, len(cached))
+        # Check in-memory cache
+        cached_in_memory = _cache.get(q)
+        if cached_in_memory and now < cached_in_memory["expire_at"]:
+            logger.info("Query '%s' found in in-memory cache, streaming %d products", q, len(cached_in_memory["data"]))
+            async def cached_stream_in_memory():
+                yield f"event: cached\ndata: {json.dumps({'total': len(cached_in_memory['data']), 'products': cached_in_memory['data']}, ensure_ascii=False, default=str)}\n\n"
+                yield f"event: done\ndata: {json.dumps({'total': len(cached_in_memory['data']), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(cached_stream_in_memory(), media_type="text/event-stream")
 
-            async def cached_stream():
-                yield f"event: cached\ndata: {json.dumps({'total': len(cached), 'products': cached}, ensure_ascii=False, default=str)}\n\n"
-                yield f"event: done\ndata: {json.dumps({'total': len(cached), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
-
-            return StreamingResponse(cached_stream(), media_type="text/event-stream")
+        # Check DB cache
+        cached_in_db = get_latest_prices_for_query(q)
+        if cached_in_db:
+            logger.info("Query '%s' found in DB, streaming %d cached products", q, len(cached_in_db))
+            # Store in in-memory cache
+            _cache[q] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
+            async def cached_stream_db():
+                yield f"event: cached\ndata: {json.dumps({'total': len(cached_in_db), 'products': cached_in_db}, ensure_ascii=False, default=str)}\n\n"
+                yield f"event: done\ndata: {json.dumps({'total': len(cached_in_db), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(cached_stream_db(), media_type="text/event-stream")
 
     # 2. Scrape song song 7 sàn, stream kết quả từng sàn
     max_products = 15
@@ -335,6 +372,9 @@ async def search_products_stream(
             if all_products:
                 save_search_results(q, all_products)
 
+            # Store in in-memory cache
+            _cache[q] = {"data": all_products, "expire_at": datetime.utcnow() + CACHE_TTL}
+
             # 4. Gửi event done
             done_data = {
                 "total": len(all_products),
@@ -351,6 +391,7 @@ async def search_products_stream(
 
 
 # ─── Price History + LSTM Prediction Endpoints ─────────────────────────
+SEQ_LENGTH = 3
 
 @app.get("/api/products-with-history")
 def list_products_with_history():
@@ -360,6 +401,43 @@ def list_products_with_history():
         "total": len(products),
         "products": products,
     }
+
+
+@app.get("/api/product-history")
+def get_product_history_api(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """
+    Get the full price history for a single product, formatted for charting.
+    """
+    history = get_product_price_history(product_url, source)
+    if not history:
+        return {"error": "No price history found for this product."}
+
+    # Format for charting libraries like Recharts or Chart.js
+    chart_data = [
+        {
+            "time": entry.get("scraped_at").strftime("%Y-%m-%d"),
+            "price": entry.get("price_value", parse_price(entry.get("price")))
+        }
+        for entry in history if entry.get("price_value", parse_price(entry.get("price"))) > 0
+    ]
+    return chart_data
+
+
+@app.get("/api/product-statistics")
+def get_product_statistics_api(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """
+    Get pre-calculated price statistics for a single product.
+    """
+    stats = get_price_statistics(product_url, source)
+    if not stats:
+        return {"error": "No statistics found for this product."}
+    return stats
 
 
 # ─── MobileCity Full Crawl Endpoints ──────────────────────────────────
@@ -809,8 +887,8 @@ def product_analysis(
     }
 
     # Get forecast if available
-    forecast = get_prediction(product_url, source)
-    forecast_result = forecast.get("prediction") if forecast else None
+    forecast_data = get_forecasts(product_url, source)
+    forecast_result = forecast_data # Needs adaptation in recommendation_engine
 
     # Run full analysis
     result = analyze_product(
@@ -892,8 +970,8 @@ def buy_recommendation(
     price_stats = calculate_price_statistics(product_url, source)
 
     # Get forecast
-    forecast = get_prediction(product_url, source)
-    forecast_result = forecast.get("prediction") if forecast else None
+    forecast_data = get_forecasts(product_url, source)
+    forecast_result = forecast_data # Needs adaptation in recommendation_engine
 
     # Get recommendation
     recommendation = get_buy_recommendation(

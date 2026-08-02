@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import numpy as np
 
-from utils.price_predictor import parse_price_string, classify_price_change, get_change_label
+from utils.price_predictor import classify_price_change, get_change_label
 from utils.db import get_product_price_history, get_all_products, get_latest_prices_for_query
 
 logger = logging.getLogger(__name__)
@@ -276,7 +276,7 @@ def get_buy_recommendation(
     product: Dict[str, Any],
     pqs_result: Optional[Dict[str, Any]] = None,
     price_stats: Optional[Dict[str, Any]] = None,
-    forecast_result: Optional[Dict[str, Any]] = None,
+    forecast_result: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Đưa ra khuyến nghị mua hàng dựa trên tổng hợp nhiều chỉ số.
@@ -353,22 +353,29 @@ def get_buy_recommendation(
     # === Factor 3: Forecast ===
     max_score += 35
     if forecast_result:
-        predictions = forecast_result.get("predictions", [])
+        predictions = forecast_result
         if predictions:
-            first_pred = predictions[0].get("price", 0)
-            last_pred = predictions[-1].get("price", 0)
-            if first_pred > 0:
-                forecast_change = (last_pred - first_pred) / first_pred
-                if forecast_change < -0.03:
+            current_price = price_stats.get("current_price", 0) if price_stats else 0
+            if current_price == 0:
+                # Fallback if no current price from stats
+                history = get_product_price_history(product.get("product_url"), product.get("source"))
+                if history:
+                    current_price = parse_price_string(history[-1].get("price", "")) or 0
+
+            last_pred_price = predictions[-1].get("forecast_price", 0)
+
+            if current_price > 0 and last_pred_price > 0:
+                forecast_change_pct = (last_pred_price - current_price) / current_price
+                if forecast_change_pct < -0.03:
                     # Dự báo giảm -> nên chờ
                     factors["forecast_bad"] = False
                     score += 30
-                    reasons.append(f"📊 Dự báo giá sẽ giảm {abs(forecast_change)*100:.1f}% - nên chờ thêm")
-                elif forecast_change > 0.03:
+                    reasons.append(f"📊 Dự báo giá có thể giảm {abs(forecast_change_pct)*100:.1f}% - nên chờ thêm")
+                elif forecast_change_pct > 0.03:
                     # Dự báo tăng -> nên mua ngay
                     factors["forecast_bad"] = True
                     score += 35
-                    reasons.append(f"📊 Dự báo giá sẽ tăng {forecast_change*100:.1f}% - nên mua ngay")
+                    reasons.append(f"📊 Dự báo giá có thể tăng {forecast_change_pct*100:.1f}% - nên mua ngay")
                 else:
                     factors["forecast_bad"] = True
                     score += 25
