@@ -70,6 +70,20 @@ DEFAULT_HEADERS = {
     "Cache-Control": "max-age=0",
 }
 
+# Điều kiện chờ Cloudflare managed challenge tự giải xong trước khi crawl4ai
+# chụp HTML (nếu không, ABID sẽ nhìn thấy script challenge và hard-fail).
+# Trả về True khi challenge đã biến mất khỏi DOM.
+CLOUDFLARE_WAIT_JS = (
+    "js:() => {"
+    "  const html = document.documentElement.outerHTML || '';"
+    "  const hasChallenge = html.includes('/cdn-cgi/challenge-platform/')"
+    "    || html.includes('challenge-form')"
+    "    || html.includes('__cf_chl_f_tk=')"
+    "    || (document.title && /just a moment|checking your browser/i.test(document.title));"
+    "  return !hasChallenge;"
+    "}"
+)
+
 # Script chạy trước mọi trang — che giấu dấu vết headless/automation
 STEALTH_INIT_SCRIPTS = [
     """
@@ -164,9 +178,10 @@ class BaseScraper(ABC):
             simulate_user=True,
             override_navigator=True,
             magic=True,
+            # Chờ Cloudflare challenge tự giải xong (nếu có) trước khi chụp HTML
+            wait_for=wait_for or CLOUDFLARE_WAIT_JS,
+            wait_for_timeout=30000,
         )
-        if wait_for:
-            cfg.wait_for = wait_for
         try:
             result = await crawler.arun(url=url, config=cfg)
             if result and result.success:
