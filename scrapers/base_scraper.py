@@ -8,6 +8,7 @@ Kèm thuộc tính: site_name, base_url, category_paths.
 """
 import asyncio
 import logging
+import random
 import re
 import unicodedata
 from abc import ABC, abstractmethod
@@ -38,6 +39,69 @@ window.scrollTo(0,document.body.scrollHeight);await s(1500);}
 window.scrollTo(0,document.body.scrollHeight);await s(500)})();
 """
 
+# Danh sách User-Agent hiện đại (tránh Chrome/116 cũ dễ bị chặn)
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+]
+
+VIEWPORT_SIZES = [
+    {"width": 1920, "height": 1080},
+    {"width": 1366, "height": 768},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1280, "height": 720},
+]
+
+# Header giả lập trình duyệt thật (tiếng Việt)
+DEFAULT_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
+    "Cache-Control": "max-age=0",
+}
+
+# Script chạy trước mọi trang — che giấu dấu vết headless/automation
+STEALTH_INIT_SCRIPTS = [
+    """
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    window.chrome = window.chrome || { runtime: {} };
+    Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+            const mk = (n, d, f) => ({ name: n, description: d, filename: f, length: 0, item: () => null, namedItem: () => null, [Symbol.iterator]: function*() {} });
+            const arr = [
+                mk('Chrome PDF Plugin', 'Portable Document Format', 'internal-pdf-viewer'),
+                mk('Chrome PDF Viewer', '', 'mhjfbmdgcfjbbpaeojofohoefgiehjai'),
+                mk('Native Client', '', 'internal-nacl-plugin'),
+            ];
+            arr.item = i => arr[i] || null;
+            arr.namedItem = n => arr.find(p => p.name === n) || null;
+            arr.refresh = () => {};
+            return arr;
+        }
+    });
+    Object.defineProperty(navigator, 'languages', { get: () => ['vi-VN', 'vi', 'en-US', 'en'] });
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+    Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 + Math.floor(Math.random() * 4) });
+    if (navigator.connection) Object.defineProperty(navigator.connection, 'rtt', { get: () => 100 + Math.floor(Math.random() * 200) });
+    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (origQuery) {
+        window.navigator.permissions.query = (p) => p && p.name === 'notifications'
+            ? Promise.resolve({ state: Notification.permission })
+            : origQuery(p);
+    }
+    """,
+]
+
 
 def normalize_text(s: str) -> str:
     """Bỏ dấu tiếng Việt, chuyển chữ thường để so khớp."""
@@ -64,18 +128,52 @@ class BaseScraper(ABC):
         self.category_paths: List[str] = []
         # JS chạy trước khi parse trang danh mục — tự click nút "Xem thêm" nhiều lần.
         self.load_more_js: str = DEFAULT_LOAD_MORE_JS
-        self._browser_cfg = BrowserConfig(headless=headless, verbose=False, text_mode=True)
+
+        user_agent = random.choice(USER_AGENTS)
+        viewport = random.choice(VIEWPORT_SIZES)
+
+        self._browser_cfg = BrowserConfig(
+            headless=headless,
+            verbose=False,
+            text_mode=True,
+            enable_stealth=True,
+            user_agent=user_agent,
+            viewport=viewport,
+            headers=dict(DEFAULT_HEADERS),
+            init_scripts=list(STEALTH_INIT_SCRIPTS),
+            extra_args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--lang=vi-VN",
+                "--window-size=1920,1080",
+            ],
+        )
 
     # ---------------------------------------------------------------- fetch
     async def _fetch_async(self, url: str, crawler: AsyncWebCrawler, wait_for: str = "", js_code: str = "") -> Optional[str]:
+        cfg = CrawlerRunConfig(
+            cache_mode=CacheMode.BYPASS,
+            js_code=js_code or None,
+            page_timeout=45000,
+            wait_until="load",
+            max_retries=2,
+            simulate_user=True,
+            override_navigator=True,
+            magic=True,
+        )
+        if wait_for:
+            cfg.wait_for = wait_for
         try:
-            cfg = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, js_code=js_code or None)
-            if wait_for:
-                cfg.wait_for = wait_for
             result = await crawler.arun(url=url, config=cfg)
             if result and result.success:
                 return result.html
             logger.warning(f"[{self.site_name}] crawl4ai fail: {url}")
+        except asyncio.TimeoutError:
+            logger.warning(f"[{self.site_name}] Timeout: {url}")
         except Exception as e:
             logger.warning(f"[{self.site_name}] Lỗi fetch {url}: {e}")
         return None
