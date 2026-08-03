@@ -8,6 +8,13 @@ def setup_logging(log_filename: str = "app.log"):
     """
     Sets up logging to both console and a rotating file.
     """
+    # Đảm bảo console xuất UTF-8 để log tiếng Việt không lỗi encoding
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     log_dir = "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)

@@ -1,41 +1,48 @@
 from typing import List
 
-from scrapers.fptshop import FPTShopScraper
-from scrapers.thegioididong import TheGioiDiDongScraper
-from scrapers.cellphones import CellphoneSScraper
+from scrapers.all_sites import TGDDScraper, FPTScraper, CellphoneSScraper
 
-from utils.browser import BrowserManager
+from models.product import Product
 
 
 class CrawlerService:
 
+    # Dùng các scraper mới (crawl4ai-based) từ all_sites.py
     SCRAPERS = [
-        FPTShopScraper,
-        TheGioiDiDongScraper,
+        FPTScraper,
+        TGDDScraper,
         CellphoneSScraper,
     ]
 
     def search(self, keyword: str) -> List[dict]:
-
+        """
+        Tìm kiếm sản phẩm từ danh sách các sàn.
+        Trả về danh sách các dictionary sản phẩm.
+        """
         results = []
 
-        with BrowserManager(headless=True) as browser:
+        for scraper_cls in self.SCRAPERS:
+            try:
+                # Các scraper mới nhận tham số headless (không cần BrowserManager)
+                scraper = scraper_cls(headless=True)
+                products = scraper.search(keyword)
 
-            for scraper_cls in self.SCRAPERS:
+                if products:
+                    # Chuyển Product -> dict
+                    for p in products:
+                        if isinstance(p, Product):
+                            results.append({
+                                "name": p.name,
+                                "price": p.price,
+                                "image_url": p.image_url,
+                                "product_url": p.product_url,
+                                "source": p.source,
+                                "comments": getattr(p, "comments", []),
+                            })
+                        else:
+                            results.append(p)
 
-                scraper = scraper_cls(browser)
-
-                try:
-
-                    products = scraper.search(keyword)
-
-                    if products:
-                        results.extend(products)
-
-                except Exception as ex:
-
-                    print(
-                        f"{scraper_cls.__name__}: {ex}"
-                    )
+            except Exception as ex:
+                print(f"{scraper_cls.__name__}: {ex}")
 
         return results

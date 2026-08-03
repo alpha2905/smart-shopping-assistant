@@ -1,224 +1,334 @@
+"""
+Base scraper dùng chung — tất cả các sàn đều dùng crawl4ai (AsyncWebCrawler).
+
+Mỗi scraper con chỉ cần override:
+  - _parse_products(html, query, max_products) -> List[Product]
+  - _parse_comments(html) -> List[str]
+Kèm thuộc tính: site_name, base_url, category_paths.
+"""
+import asyncio
 import logging
+import re
+import unicodedata
 from abc import ABC, abstractmethod
 from typing import List, Optional
-from models.product import Product
-from utils.browser import BrowserManager, Page, scroll_page
-import time
-import random
 
-def random_delay(min_seconds: float = 1.5, max_seconds: float = 3.5):
-    """
-    Tạo độ trễ ngẫu nhiên để mô phỏng hành vi người dùng thật, 
-    giảm tỷ lệ bị các trang web chặn (Anti-bot).
-    """
-    delay = random.uniform(min_seconds, max_seconds)
-    time.sleep(delay)
-        
+from bs4 import BeautifulSoup
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+from models.product import Product
+
 logger = logging.getLogger(__name__)
+
+DEFAULT_LOAD_MORE_JS = """
+(async()=>{const s=ms=>new Promise(r=>setTimeout(r,ms));
+const fire=el=>{if(!el)return;el.click();try{el.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}))}catch(e){}};
+const sels=['.btn-filter-readmore','.button.btn-show-more.button__show-more-product',
+'.view-more .see-more-btn','.view-more a','.see-more-btn','.btn-viewmore',
+'.btn-show-more','.view-more','.load-more button','[class*="show-more"]','[class*="btn-seemore"]'];
+const tryClick=()=>{let n=0;for(const sel of sels){document.querySelectorAll(sel).forEach(b=>{
+if(!b||b.offsetParent===null)return;
+const a=b.closest('a')||b;b.scrollIntoView({block:'center'});
+fire(a);if(a!==b)fire(b);n++;});}return n;};
+for(let i=0;i<40;i++){window.scrollBy(0,2500);await s(350);
+if(window.scrollY+window.innerHeight>=document.body.scrollHeight)break;}
+for(let i=0;i<60;i++){
+if(!tryClick())break;
+window.scrollTo(0,document.body.scrollHeight);await s(1500);}
+window.scrollTo(0,document.body.scrollHeight);await s(500)})();
+"""
+
+
+def normalize_text(s: str) -> str:
+    """Bỏ dấu tiếng Việt, chuyển chữ thường để so khớp."""
+    s = unicodedata.normalize("NFD", str(s).lower())
+    return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+def clean_price(text: str) -> str:
+    """Chuẩn hóa chuỗi giá: giữ lại con số + đơn vị, ví dụ 29.990.000đ."""
+    if not text:
+        return "Liên hệ"
+    t = re.sub(r"\s+", " ", text.strip())
+    t = re.sub(r"([0-9])[.,](?=[0-9]{3})", r"\1.", t)
+    return t or "Liên hệ"
 
 
 class BaseScraper(ABC):
-    """Abstract base class for all site scrapers."""
+    """Base class dùng crawl4ai cho mọi sàn."""
 
-    def __init__(self, browser_manager: BrowserManager, headless: bool = True):
-        self.browser_manager = browser_manager
+    def __init__(self, headless: bool = True):
         self.headless = headless
         self.site_name: str = ""
         self.base_url: str = ""
+        self.category_paths: List[str] = []
+        # JS chạy trước khi parse trang danh mục — tự click nút "Xem thêm" nhiều lần.
+        self.load_more_js: str = DEFAULT_LOAD_MORE_JS
+        self._browser_cfg = BrowserConfig(headless=headless, verbose=False, text_mode=True)
 
+    # ---------------------------------------------------------------- fetch
+    async def _fetch_async(self, url: str, crawler: AsyncWebCrawler, wait_for: str = "", js_code: str = "") -> Optional[str]:
+        try:
+            cfg = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, js_code=js_code or None)
+            if wait_for:
+                cfg.wait_for = wait_for
+            result = await crawler.arun(url=url, config=cfg)
+            if result and result.success:
+                return result.html
+            logger.warning(f"[{self.site_name}] crawl4ai fail: {url}")
+        except Exception as e:
+            logger.warning(f"[{self.site_name}] Lỗi fetch {url}: {e}")
+        return None
+
+    def fetch_html(self, url: str, wait_for: str = "") -> Optional[str]:
+        """Cào 1 URL, trả về HTML string (sync wrapper)."""
+        async def _run():
+            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+                return await self._fetch_async(url, c, wait_for)
+        return asyncio.run(_run())
+
+    def fetch_many(self, urls: List[str], wait_for: str = "") -> List[Optional[str]]:
+        """Cào nhiều URL song song trong cùng 1 crawler (async)."""
+        async def _run():
+            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+                return await asyncio.gather(
+                    *(self._fetch_async(u, c, wait_for) for u in urls)
+                )
+        if not urls:
+            return []
+        return asyncio.run(_run())
+
+    # ---------------------------------------------------------------- parse
     @abstractmethod
-    def search(self, query: str, max_products: int = 10, fetch_comments: bool = True) -> List[Product]:
-        """
-        Search for products on the site.
-        
-        Args:
-            query: Search keyword
-            max_products: Maximum number of products to return
-            
-        Returns:
-            List of Product objects found
-        """
-        pass
+    def _parse_products(self, html: str, query: str, max_products: int) -> List[Product]:
+        """Parse danh sách sản phẩm từ HTML — override ở từng sàn."""
 
-    @abstractmethod
-    def extract_product_info(self, page: Page, query: str, max_products: int) -> List[Product]:
-        """
-        Extract product information from the search results page.
-        
-        Args:
-            page: Playwright page object with loaded search results
-            query: Original search query
-            max_products: Maximum number of products to extract
-            
-        Returns:
-            List of Product objects
-        """
-        pass
-
-    def extract_comments(self, page: Page, product_url: str) -> List[str]:
-        """
-        Extract comments/reviews from a product detail page.
-        Override in subclass if the site supports comments.
-        
-        Args:
-            page: Playwright page object
-            product_url: URL of the product detail page
-            
-        Returns:
-            List of comment strings
-        """
+    def _parse_comments(self, html: str, url: str = "") -> List[str]:
+        """Parse nội dung bình luận từ HTML trang chi tiết — override nếu cần."""
         return []
 
-    def get_search_url(self, query: str) -> str:
-        """
-        Build the search URL for the site.
-        Override in subclass if custom URL pattern is needed.
-        
-        Args:
-            query: Search keyword
-            
-        Returns:
-            Full search URL
-        """
-        import urllib.parse
-        return f"{self.base_url}/search?q={urllib.parse.quote(query)}"
+    def _parse_product_detail(self, html: str, url: str = "") -> Optional[Product]:
+        """Parse 1 trang chi tiết sản phẩm — dùng chung cho mọi sàn.
 
-    def safe_extract(self, page: Page, selector: str, attribute: str = None, default: str = "") -> str:
+        Ưu tiên JSON-LD Product/Offer (chuẩn schema.org), fallback:
+        h1/title cho tên, _find_price cho giá, og:image/img cho ảnh.
+        Sàn nào có cấu trúc riêng có thể override.
         """
-        Safely extract text or attribute from a page element.
-        
-        Args:
-            page: Playwright page object
-            selector: CSS selector
-            attribute: If provided, extract this attribute instead of text
-            default: Default value if element not found
-            
-        Returns:
-            Extracted text or attribute value
-        """
-        try:
-            element = page.query_selector(selector)
-            if element:
-                if attribute:
-                    return element.get_attribute(attribute) or default
-                return element.inner_text().strip() or default
-            return default
-        except Exception as e:
-            logger.debug(f"Error extracting {selector}: {e}")
-            return default
+        import json
+        soup = BeautifulSoup(html, "html.parser")
 
-    def safe_extract_all(self, page: Page, selector: str, attribute: str = None) -> List[str]:
-        """
-        Safely extract text or attribute from multiple page elements.
-        
-        Args:
-            page: Playwright page object
-            selector: CSS selector
-            attribute: If provided, extract this attribute instead of text
-            
-        Returns:
-            List of extracted strings
-        """
-        try:
-            elements = page.query_selector_all(selector)
-            results = []
-            for element in elements:
-                try:
-                    if attribute:
-                        val = element.get_attribute(attribute)
-                    else:
-                        val = element.inner_text().strip()
-                    if val:
-                        results.append(val)
-                except Exception:
-                    continue
-            return results
-        except Exception as e:
-            logger.debug(f"Error extracting all {selector}: {e}")
-            return []
+        name = ""
+        price = "Liên hệ"
+        image_url = ""
+        price_is_zero = False
+        def _fmt_price(raw_price):
+            """Định dạng giá số -> chuỗi, đánh dấu nếu là 0."""
+            nonlocal price_is_zero
+            try:
+                val = float(str(raw_price).replace(",", "").replace("đ", "").strip())
+            except Exception:
+                return str(raw_price)
+            # JSON-LD đôi khi trả price=0 khi hết hàng / 'Liên hệ' — coi như chưa có giá
+            if val <= 0:
+                price_is_zero = True
+                return "Liên hệ"
+            return f"{int(val):,}đ".replace(",", ".")
 
-    def is_search_page_valid(self, page: Page) -> bool:
-        """
-        Check if the search results page loaded correctly and has any content.
-        Override in subclass for site-specific validation.
-        
-        Returns:
-            True if page has content, False if blocked or empty
-        """
-        try:
-            body_text = page.inner_text("body").strip().lower()
-            # Chỉ check các keyword block rõ ràng, bỏ "robot" vì dễ false positive
-            blocked_keywords = ["captcha", "access denied", "429", "too many requests"]
-            for keyword in blocked_keywords:
-                if keyword in body_text:
-                    logger.warning(f"[{self.site_name}] Page appears to be blocked (keyword: {keyword})")
-                    return False
-            return True
-        except Exception as e:
-            logger.debug(f"[{self.site_name}] Error checking page validity: {e}")
-            return False
+        # 1) JSON-LD Product / Offer — nguồn chính xác nhất
+        for ld in soup.select("script[type='application/ld+json']"):
+            try:
+                data = json.loads(ld.get_text(strip=True))
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            node = data
+            if data.get("@graph") and isinstance(data["@graph"], list):
+                for item in data["@graph"]:
+                    if isinstance(item, dict) and item.get("@type") == "Product":
+                        node = item
+                        break
+            if not isinstance(node, dict) or node.get("@type") != "Product":
+                continue
+            if not name:
+                name = (node.get("name") or "").strip()
+            imgs = node.get("image") or []
+            if isinstance(imgs, list) and imgs:
+                first = imgs[0]
+                image_url = first if isinstance(first, str) else (first.get("url") or "" if isinstance(first, dict) else "")
+            elif isinstance(imgs, str):
+                image_url = imgs
+            offers = node.get("offers") or {}
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+            if isinstance(offers, dict):
+                raw_price = offers.get("price")
+                if raw_price is not None:
+                    try:
+                        price = f"{int(float(raw_price)):,}đ".replace(",", ".")
+                    except Exception:
+                        price = str(raw_price)
+            if name and price != "Liên hệ":
+                break
+
+        # 2) Fallback tên từ h1 / title
+        if not name:
+            h1 = soup.select_one("h1")
+            name = h1.get_text(" ", strip=True) if h1 else ""
+        if not name:
+            t = soup.select_one("title")
+            name = (t.get_text(strip=True).split("|")[0] if t else "").strip()
+
+        # 3) Fallback giá từ _find_price trên toàn trang
+        if price == "Liên hệ":
+            price = self._find_price(soup)
+
+        # 4) Fallback ảnh từ og:image / thẻ img
+        if not image_url:
+            og = soup.select_one("meta[property='og:image']")
+            if og and og.get("content"):
+                image_url = og["content"].strip()
+            else:
+                image_url = self._img_from_soup(soup.select_one("img[src], img[data-src]"))
+
+        if not name:
+            return None
+        canonical = soup.select_one("link[rel='canonical']")
+        href = url or self._abs_url(self.base_url, canonical.get("href", "") if canonical else "")
+        return Product(name=name, price=price, image_url=image_url,
+                       product_url=href, source=self.site_name)
+
+    # ---------------------------------------------------------------- helpers
+    def _norm(self, s: str) -> str:
+        return normalize_text(s)
 
     def _is_phone_product(self, name: str, product_url: str = "") -> bool:
-        """
-        Kiểm tra sản phẩm có phải điện thoại không.
-        Lọc ra phụ kiện, tablet, laptop, tai nghe, v.v. ngay tại lúc crawl.
-        """
+        """Lọc sản phẩm không phải điện thoại."""
         if not name:
             return False
-
-        import unicodedata
-        def normalize(s):
-            s = unicodedata.normalize("NFD", s.lower())
-            s = "".join(c for c in s if unicodedata.category(c) != "Mn")
-            return s
-
-        norm_name = normalize(name)
-        norm_url = normalize(product_url.replace("-", " ").replace("/", " "))
-
-        # Từ khóa loại trừ — không phải điện thoại
-        non_phone_keywords = [
-            "tai nghe", "op lung", "sac du phong", "pin du phong", "sac khong day",
-            "cap sac", "cap type c", "cap lightning", "cap usb", "cap chuyen doi",
-            "loa bluetooth", "loa di dong", "may tinh bang", "tablet", "ipad",
-            "laptop", "macbook", "dong ho thong minh", "smartwatch", "apple watch",
-            "airpods", "phu kien", "phụ kiện", "bao da", "op dien thoai",
-            "kinh cuong luc", "cuong luc", "dan man hinh", "mieng dan man hinh",
-            "chuot", "ban phim", "the nho", "o cung di dong", "usb",
-            "camera", "may anh", "tivi", "man hinh may tinh",
-            "pin laptop", "tai nghe bluetooth", "tai nghe co day",
-            "micro", "gimbal", "tripod", "chan may", "gia do dien thoai",
-            "mieng dan", "op luung", "cuongluc", "balo", "tui xach",
-            "may doc sach", "kindle", "may choi game", "tay cam choi game",
-            "router", "modem", "sim", "the sim", "thiet bi mang",
+        norm_name = self._norm(name)
+        norm_url = self._norm(product_url.replace("-", " ").replace("/", " "))
+        excluded = [
+            "tai nghe", "op lung", "sac du phong", "pin du phong", "cap sac",
+            "loa", "may tinh bang", "tablet", "ipad", "laptop", "macbook",
+            "dong ho", "smartwatch", "apple watch", "airpods", "phu kien",
+            "bao da", "kinh cuong luc", "dan man hinh", "chuot", "ban phim",
+            "the nho", "usb", "camera", "may anh", "tivi", "router", "modem",
+            "sim", "goi cuoc", "tra gop", "balo", "gia do", "chan may",
         ]
-
-        for kw in non_phone_keywords:
-            norm_kw = normalize(kw)
-            if norm_kw in norm_name:
+        for kw in excluded:
+            if kw in norm_name:
                 return False
-
-        # URL chứa từ khóa điện thoại → chắc chắn là điện thoại
-        if any(h in norm_url for h in ["dien thoai", "dien-thoai", "phone", "smartphone", "/mobile"]):
+        if any(h in norm_url for h in ["dien thoai", "dien-thoai", "phone", "smartphone", "mobile"]):
             return True
-
-        # Tên chứa thương hiệu/dòng điện thoại
-        phone_hints = [
-            "iphone", "galaxy", "redmi", "poco", "xiaomi", "oppo", "vivo", "realme",
-            "nokia", "huawei", "honor", "oneplus", "pixel", "zenfone", "rog phone",
-            "dien thoai", "smartphone",
+        hints = [
+            "iphone", "galaxy", "redmi", "poco", "xiaomi", "oppo", "vivo",
+            "realme", "nokia", "huawei", "honor", "oneplus", "pixel", "zenfone",
+            "dien thoai", "smartphone", "itel", "infinix", "tecno", "vsmart",
         ]
-        if any(h in norm_name for h in phone_hints):
+        if any(h in norm_name for h in hints):
             return True
-
-        # Mặc định: coi là điện thoại nếu không khớp từ khóa loại trừ
         return True
 
-    def wait_and_scroll(self, page: Page, initial_wait: int = 3000, scroll_times: int = 3) -> None:
-        """Wait for page to load initial content and then scroll to trigger lazy loading."""
-        try:
-            page.wait_for_timeout(initial_wait)
-            scroll_page(page, scroll_times=scroll_times, delay=800)
-            # Small extra wait after scrolling
-            page.wait_for_timeout(1000)
-        except Exception as e:
-            logger.debug(f"[{self.site_name}] Error during wait_and_scroll: {e}")
+    def _find_price(self, container) -> str:
+        """Tìm giá trong 1 container: ưu tiên class price--show/.product__price,
+        fallback phần tử ngắn chứa chữ số + 'đ'."""
+        for sel in ("[class*='price--show']", ".product__price",
+                    "[class*='special-price']", ".price"):
+            el = container.select_one(sel)
+            if el:
+                t = el.get_text(" ", strip=True)
+                if any(c.isdigit() for c in t):
+                    return clean_price(t)
+        for el in container.select("p, span, div, strong, b"):
+            t = el.get_text(" ", strip=True)
+            m = re.search(r"\d[\d.,]*\s*đ", t)
+            if m:
+                return clean_price(m.group(0))
+        return "Liên hệ"
+
+    @staticmethod
+    def _img_from_soup(img) -> str:
+        """Lấy URL ảnh từ thẻ <img> (data-src trước, fallback src)."""
+        if img is None:
+            return ""
+        for attr in ("data-src", "data-original", "data-lazy", "src"):
+            val = img.get(attr)
+            if val:
+                return val.strip()
+        return ""
+
+    @staticmethod
+    def _abs_url(base: str, href: str) -> str:
+        if not href:
+            return ""
+        href = href.strip()
+        if href.startswith("http"):
+            return href
+        if href.startswith("/"):
+            return base + href
+        return href
+
+    # ---------------------------------------------------------------- public API
+    def search(self, query: str, max_products: int = 10, fetch_comments: bool = True) -> List[Product]:
+        """Tìm kiếm sản phẩm — override get_search_url nếu cần."""
+        from urllib.parse import quote
+        url = f"{self.base_url}/search?q={quote(query)}"
+        html = self.fetch_html(url)
+        if not html:
+            return []
+        products = self._parse_products(html, query, max_products)
+        if fetch_comments:
+            self._attach_comments(products)
+        return products
+
+    def crawl_all_phones(self, max_products: Optional[int] = None) -> List[Product]:
+        """Cào toàn bộ điện thoại từ category_paths."""
+        all_products: List[Product] = []
+        seen = set()
+
+        async def _crawl():
+            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+                for path in self.category_paths:
+                    url = self.base_url + path
+                    logger.info(f"[{self.site_name}] Crawl danh mục {url}")
+                    html = await self._fetch_async(url, c, js_code=self.load_more_js)
+                    if not html:
+                        continue
+                    for p in self._parse_products(html, "", 100000):
+                        if p.product_url not in seen:
+                            seen.add(p.product_url)
+                            all_products.append(p)
+                    logger.info(f"[{self.site_name}] {path} -> {len(all_products)} sp")
+                return all_products
+
+        products = asyncio.run(_crawl())
+        if max_products:
+            products = products[:max_products]
+        return products
+
+    def _attach_comments(self, products: List[Product], max_comments: int = 300) -> None:
+        """Cào bình luận cho danh sách sản phẩm (async, song song)."""
+        if not products:
+            return
+        urls = [p.product_url for p in products]
+
+        async def _run():
+            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+                htmls = await asyncio.gather(*(self._fetch_async(u, c) for u in urls))
+                return htmls
+
+        htmls = asyncio.run(_run())
+        for prod, html in zip(products, htmls):
+            if html:
+                cmts = self._parse_comments(html, prod.product_url)
+                prod.comments = cmts[:max_comments]
+            logger.info(f"[{self.site_name}] {prod.name[:40]} -> {len(prod.comments)} comments")
+
+    def product_dicts(self, products: List[Product]) -> List[dict]:
+        """Chuyển List[Product] -> List[dict] để lưu DB."""
+        return [
+            {"name": p.name, "price": p.price, "image_url": p.image_url,
+             "product_url": p.product_url, "source": p.source, "comments": p.comments}
+            for p in products
+        ]

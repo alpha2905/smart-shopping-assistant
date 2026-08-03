@@ -50,4 +50,4 @@ jobs:
           PYTHONUNBUFFERED: "1"
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           MONGO_DB: ${{ secrets.MONGO_DB }}
-        run: python scripts/update_prices.py
+        run: python scripts/updateprice.py --once

@@ -160,15 +160,23 @@ def save_search_results(query: str, products: List[Dict[str, Any]]) -> None:
             set_fields["comments_count"] = len(comments)
 
         # Calculate and add statistics
-        price_values = [h.get('price_value', parse_price(h.get('price'))) for h in history if h.get('price_value', parse_price(h.get('price'))) > 0]
-        price_values.append(new_price_value)
+        # Luôn cập nhật giá mới nhất, kể cả khi là 0
+        set_fields["latest_price"] = new_price_value
+
+        history_prices = [h.get('price_value', parse_price(h.get('price'))) for h in history]
+        all_prices = history_prices + [new_price_value]
+        # Lọc các giá hợp lệ (> 0) để tính toán thống kê
+        valid_prices = [p for p in all_prices if p > 0]
         
-        # Only calculate stats if there are valid prices
-        if price_values:
-            set_fields["latest_price"] = new_price_value
-            set_fields["lowest_price"] = min(price_values)
-            set_fields["highest_price"] = max(price_values)
-            set_fields["average_price"] = int(sum(price_values) / len(price_values))
+        if valid_prices:
+            set_fields["lowest_price"] = min(valid_prices)
+            set_fields["highest_price"] = max(valid_prices)
+            set_fields["average_price"] = int(sum(valid_prices) / len(valid_prices))
+        else:
+            # Nếu không có giá hợp lệ nào, đặt các thống kê về 0
+            set_fields["lowest_price"] = 0
+            set_fields["highest_price"] = 0
+            set_fields["average_price"] = 0
 
         # Construct the final update operation
         update_op = {"$set": set_fields}
