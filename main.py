@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 # APScheduler cho tác vụ định kỳ
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from utils.browser import BrowserManager
 from utils.db import (
     init_db, save_search_results, get_unique_queries, close_db,
     get_product_price_history, get_products_with_price_history, get_price_statistics, get_latest_prices_for_query,
@@ -31,48 +30,7 @@ from utils.recommendation_engine import (
     calculate_pqs, calculate_price_statistics, get_buy_recommendation,
     analyze_product, analyze_products_batch,
 )
-
-# Import 7 scraper
-from ai.dataset import get_price_data
-from ai.preprocess import prepare_time_series_data
-from ai.train_lstm import train_and_save_model
-from ai.predict import get_model, forecast_future_prices
-from ai.evaluate import evaluate_model_performance
-from ai.sentiment.service import analyze_and_save_product_sentiment
-
-# Import scrapers
-from scrapers.fptshop import FPTShopScraper
-from scrapers.didongviet import DiDongVietScraper
-from scrapers.clickbuy import ClickbuyScraper
-from scrapers.cellphones import CellphoneSScraper
-from scrapers.viettelstore import ViettelStoreScraper
-from scrapers.hoanghamobile import HoangHaMobileScraper
-from scrapers.mobilecity import MobileCityScraper
-from scrapers.thegioididong import TheGioiDiDongScraper
-
-# Mapping từ scraper class → tên sàn (để gửi SSE event cho FE)
-SCRAPER_NAMES = {
-    "FPTShopScraper": "FPT Shop",
-    "DiDongVietScraper": "Di Động Việt",
-    "ClickbuyScraper": "Clickbuy",
-    "CellphoneSScraper": "CellphoneS",
-    "ViettelStoreScraper": "Viettel Store",
-    "HoangHaMobileScraper": "Hoàng Hà Mobile",
-    "MobileCityScraper": "MobileCity",
-    "TheGioiDiDongScraper": "Thế Giới Di Động",
-}
-
-# Danh sách 7 scraper class
-ALL_SCRAPER_CLASSES = [
-    FPTShopScraper,
-    DiDongVietScraper,
-    ClickbuyScraper,
-    CellphoneSScraper,
-    ViettelStoreScraper,
-    HoangHaMobileScraper,
-    MobileCityScraper,
-    TheGioiDiDongScraper,
-]
+from utils.search_filter import filter_comparable_phones
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -87,14 +45,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ─── In-memory cache ───────────────────────────────────────────────────
+CACHE_TTL = timedelta(hours=1)
+_cache: Dict[str, Dict[str, Any]] = {}
+
 # ─── Scheduler chạy ngầm ────────────────────────────────────────────────
 scheduler = BackgroundScheduler()
 
 
+def _get_scraper_classes():
+    """
+    Lazy import các scraper crawl4ai (chỉ khi cần) để tránh phụ thuộc
+    crawl4ai khi chạy CI/tests (requirements.txt không cài crawl4ai).
+    """
+    from scrapers.all_sites import (
+        TGDDScraper, FPTScraper, CellphoneSScraper, HoangHaScraper,
+        DiDongVietScraper, ViettelStoreScraper, ClickBuyScraper, MobileCityScraper,
+    )
+    return [
+        FPTScraper, DiDongVietScraper, ClickBuyScraper, CellphoneSScraper,
+        ViettelStoreScraper, HoangHaScraper, MobileCityScraper, TGDDScraper,
+    ]
+
+
 def run_single_scraper(scraper_class, query: str, max_products: int = 5) -> List[Dict[str, Any]]:
     """
-    Hàm chạy từng scraper với BrowserManager riêng (thread-safe).
-    Mỗi scraper có browser instance riêng để tránh conflict.
+    Hàm chạy từng scraper (crawl4ai-based) trong thread riêng.
     """
     if sys.platform == 'win32':
         try:
@@ -104,20 +80,19 @@ def run_single_scraper(scraper_class, query: str, max_products: int = 5) -> List
 
     products_data = []
     try:
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = scraper_class(browser_manager)
-            logger.info(f"Đang cào từ {scraper.site_name} (query='{query}')...")
-            products = scraper.search(query=query, max_products=max_products)
-            for p in products:
-                products_data.append({
-                    "name": p.name,
-                    "price": p.price,
-                    "image_url": p.image_url,
-                    "product_url": p.product_url,
-                    "source": p.source,
-                    "comments": getattr(p, "comments", [])
-                })
-            logger.info(f"Hoàn thành {scraper.site_name}: {len(products)} sản phẩm")
+        scraper = scraper_class(headless=True)
+        logger.info(f"Đang cào từ {scraper.site_name} (query='{query}')...")
+        products = scraper.search(query=query, max_products=max_products)
+        for p in products:
+            products_data.append({
+                "name": p.name,
+                "price": p.price,
+                "image_url": p.image_url,
+                "product_url": p.product_url,
+                "source": p.source,
+                "comments": getattr(p, "comments", []),
+            })
+        logger.info(f"Hoàn thành {scraper.site_name}: {len(products)} sản phẩm")
     except Exception as e:
         logger.error(f"Lỗi khi cào từ {scraper_class.__name__}: {e}", exc_info=True)
     return products_data
@@ -125,21 +100,11 @@ def run_single_scraper(scraper_class, query: str, max_products: int = 5) -> List
 
 def scrape_and_save(query: str) -> List[Dict[str, Any]]:
     """Scrape từ tất cả sàn cho 1 query, lưu vào MongoDB, trả về kết quả."""
-    scraper_classes = [
-        FPTShopScraper,
-        DiDongVietScraper,
-        ClickbuyScraper,
-        CellphoneSScraper,
-        ViettelStoreScraper,
-        HoangHaMobileScraper,
-        TheGioiDiDongScraper,
-    ]
+    scraper_classes = _get_scraper_classes()
 
     all_products = []
     max_products = None
 
-    # Mỗi scraper dùng BrowserManager riêng (thread-safe)
-    # Giới hạn max_workers=3 để tránh quá tải RAM/CPU
     with ThreadPoolExecutor(max_workers=7) as executor:
         future_map = {
             executor.submit(run_single_scraper, sc, query, max_products): sc.__name__
@@ -161,7 +126,6 @@ def scrape_and_save(query: str) -> List[Dict[str, Any]]:
         f"Lưu hết {len(all_products)} sản phẩm vào DB"
     )
 
-    # Lưu TẤT CẢ sản phẩm vào DB (không chỉ sản phẩm đã lọc)
     if all_products:
         save_search_results(query, all_products)
 
@@ -192,19 +156,17 @@ def scheduled_scrape_all():
 @app.on_event("startup")
 def startup():
     """Khởi tạo DB + scheduler khi app start."""
-    # Khởi tạo MongoDB indexes
     init_sentiment_collection()
     init_forecast_collection()
     init_db()
 
-    # Schedule: scrape mỗi giờ (cả khi không có request nào)
     scheduler.add_job(
         scheduled_scrape_all,
         "interval",
         hours=1,
         id="hourly_scrape",
         replace_existing=True,
-        next_run_time=None,  # None = không chạy ngay khi start, đợi đúng giờ
+        next_run_time=None,
     )
     scheduler.start()
     logger.info("Scheduler started: sẽ scrape lại tất cả query mỗi 1 giờ")
@@ -228,9 +190,7 @@ def search_products(
 ):
     now = datetime.utcnow()
 
-    # 1. Nếu không force_refresh, check cache
     if not force_refresh:
-        # Check in-memory cache first
         cached_in_memory = _cache.get(q)
         if cached_in_memory and now < cached_in_memory["expire_at"]:
             logger.info("Query '%s' found in in-memory cache, returning %d products.", q, len(cached_in_memory["data"]))
@@ -241,11 +201,9 @@ def search_products(
                 "cached": True,
             }
 
-        # Check DB cache
         cached_in_db = get_latest_prices_for_query(q)
         if cached_in_db:
             logger.info("Query '%s' found in DB, returning %d cached products instantly", q, len(cached_in_db))
-            # Store in in-memory cache for next time
             _cache[q] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
             return {
                 "query": q,
@@ -254,11 +212,9 @@ def search_products(
                 "cached": True,
             }
 
-    # 2. Nếu chưa có trong DB (hoặc force_refresh) → scrape từ 7 sàn
-    logger.info("Query '%s' not in cache (or force_refresh), scraping from 7 stores...", q)
+    logger.info("Query '%s' not in cache (or force_refresh), scraping from stores...", q)
     all_products = scrape_and_save(q)
 
-    # Store result in in-memory cache
     _cache[q] = {"data": all_products, "expire_at": now + CACHE_TTL}
 
     return {
@@ -272,15 +228,11 @@ def search_products(
 # ─── SSE Streaming Search Endpoint ─────────────────────────────────────
 
 async def _run_scraper_async(scraper_class, query: str, max_products: int) -> Tuple[str, List[Dict[str, Any]]]:
-    """
-    Chạy 1 scraper trong thread pool (bất đồng bộ).
-    Trả về (source_name, products_list).
-    """
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         None, run_single_scraper, scraper_class, query, max_products
     )
-    source = SCRAPER_NAMES.get(scraper_class.__name__, scraper_class.__name__)
+    source = getattr(scraper_class, "site_name", scraper_class.__name__)
     return source, result
 
 
@@ -289,21 +241,9 @@ async def search_products_stream(
     q: str = Query(..., description="Từ khóa tìm kiếm sản phẩm"),
     force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
 ):
-    """
-    SSE endpoint: scrape 7 sàn song song (asyncio.gather),
-    push kết quả từng sàn về FE ngay khi xong (Server-Sent Events).
-
-    Event format:
-      event: store   → {"source": "FPT Shop", "products": [...], "count": 5}
-      event: cached  → {"total": 35, "products": [...]}
-      event: done    → {"total": 35, "query": "iphone", "cached": false}
-      event: error   → {"message": "..."}
-    """
     now = datetime.utcnow()
 
-    # 1. Check cache trước (trả về ngay nếu có)
     if not force_refresh:
-        # Check in-memory cache
         cached_in_memory = _cache.get(q)
         if cached_in_memory and now < cached_in_memory["expire_at"]:
             logger.info("Query '%s' found in in-memory cache, streaming %d products", q, len(cached_in_memory["data"]))
@@ -312,37 +252,32 @@ async def search_products_stream(
                 yield f"event: done\ndata: {json.dumps({'total': len(cached_in_memory['data']), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
             return StreamingResponse(cached_stream_in_memory(), media_type="text/event-stream")
 
-        # Check DB cache
         cached_in_db = get_latest_prices_for_query(q)
         if cached_in_db:
             logger.info("Query '%s' found in DB, streaming %d cached products", q, len(cached_in_db))
-            # Store in in-memory cache
             _cache[q] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
             async def cached_stream_db():
                 yield f"event: cached\ndata: {json.dumps({'total': len(cached_in_db), 'products': cached_in_db}, ensure_ascii=False, default=str)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'total': len(cached_in_db), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
             return StreamingResponse(cached_stream_db(), media_type="text/event-stream")
 
-    # 2. Scrape song song 7 sàn, stream kết quả từng sàn
     max_products = 15
+    scraper_classes = _get_scraper_classes()
 
     async def event_stream():
         all_products = []
 
-        # Tạo task cho từng scraper — chạy song song bằng asyncio
         tasks = [
             asyncio.ensure_future(_run_scraper_async(sc, q, max_products))
-            for sc in ALL_SCRAPER_CLASSES
+            for sc in scraper_classes
         ]
 
         try:
-            # as_completed: yield kết quả theo thứ tự sàn nào xong trước
             for coro in asyncio.as_completed(tasks):
                 try:
                     source, result = await coro
                     if result:
                         all_products.extend(result)
-                        # Push kết quả sàn này về FE ngay lập tức
                         event_data = {
                             "source": source,
                             "products": result,
@@ -350,7 +285,6 @@ async def search_products_stream(
                         }
                         yield f"event: store\ndata: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
                     else:
-                        # Sàn không có sản phẩm → vẫn báo cho FE biết
                         event_data = {
                             "source": source,
                             "products": [],
@@ -361,21 +295,17 @@ async def search_products_stream(
                     logger.error(f"Lỗi scraper trong SSE stream: {e}", exc_info=True)
                     yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
 
-            # 3. Lọc để hiển thị/log (nhưng vẫn lưu TẤT CẢ sản phẩm vào DB)
             filtered_products = filter_comparable_phones(all_products, q)
             logger.info(
                 f"SSE stream: {len(all_products)} sản phẩm thô → {len(filtered_products)} điện thoại khớp. "
                 f"Lưu hết {len(all_products)} sản phẩm vào DB"
             )
 
-            # Lưu TẤT CẢ sản phẩm vào DB (không chỉ sản phẩm đã lọc)
             if all_products:
                 save_search_results(q, all_products)
 
-            # Store in in-memory cache
             _cache[q] = {"data": all_products, "expire_at": datetime.utcnow() + CACHE_TTL}
 
-            # 4. Gửi event done
             done_data = {
                 "total": len(all_products),
                 "query": q,
@@ -393,6 +323,99 @@ async def search_products_stream(
 # ─── Price History + LSTM Prediction Endpoints ─────────────────────────
 SEQ_LENGTH = 3
 
+
+def _create_sequences(data, seq_length: int):
+    """Tạo chuỗi (X, y) cho LSTM từ dữ liệu đã chuẩn hóa."""
+    X, y = [], []
+    for i in range(len(data) - seq_length):
+        X.append(data[i : i + seq_length])
+        y.append(data[i + seq_length])
+    return X, y
+
+
+def _train_and_predict(price_history: List[Dict[str, Any]], predict_days: int = 7):
+    """
+    Huấn luyện LSTM nhanh và dự báo giá (lazy import tensorflow).
+    Trả về dict kết quả hoặc None nếu không đủ dữ liệu.
+    """
+    import numpy as np
+    from sklearn.preprocessing import MinMaxScaler
+
+    prices = []
+    for h in price_history:
+        p = h.get("price_value", parse_price(h.get("price", "")))
+        if p and p > 0:
+            prices.append(float(p))
+
+    if len(prices) < SEQ_LENGTH + 1:
+        return None
+
+    prices_raw = np.array(prices).reshape(-1, 1)
+    scaler = MinMaxScaler()
+    prices_norm = scaler.fit_transform(prices_raw).flatten()
+
+    X, y = _create_sequences(prices_norm, SEQ_LENGTH)
+    if not X:
+        return None
+
+    X = np.array(X).reshape((len(X), SEQ_LENGTH, 1))
+    y = np.array(y)
+
+    # Lazy import tensorflow để tránh lỗi khi chạy CI/tests
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Input, Dropout
+    from tensorflow.keras.optimizers import Adam
+
+    model = Sequential([
+        Input(shape=(SEQ_LENGTH, 1)),
+        LSTM(64, return_sequences=True),
+        Dropout(0.2),
+        LSTM(32, return_sequences=False),
+        Dropout(0.2),
+        Dense(16, activation="relu"),
+        Dense(1),
+    ])
+    model.compile(optimizer=Adam(learning_rate=0.01), loss="mse")
+    model.fit(X, y, epochs=50, batch_size=4, verbose=0)
+
+    # Dự báo
+    last_sequence = prices_norm[-SEQ_LENGTH:].copy()
+    predictions_norm = []
+    for _ in range(predict_days):
+        input_seq = last_sequence.reshape((1, SEQ_LENGTH, 1))
+        pred_norm = model.predict(input_seq, verbose=0)[0][0]
+        predictions_norm.append(pred_norm)
+        last_sequence = np.append(last_sequence[1:], pred_norm)
+
+    predictions_raw = scaler.inverse_transform(np.array(predictions_norm).reshape(-1, 1)).flatten()
+
+    # Metrics
+    y_pred_train_norm = model.predict(X, verbose=0)
+    y_pred_train_raw = scaler.inverse_transform(y_pred_train_norm)
+    y_true_raw = prices_raw[SEQ_LENGTH:]
+    mae = float(np.mean(np.abs(y_true_raw - y_pred_train_raw)))
+    rmse = float(np.sqrt(np.mean((y_true_raw - y_pred_train_raw) ** 2)))
+    mask = y_true_raw != 0
+    mape = float(np.mean(np.abs((y_true_raw[mask] - y_pred_train_raw[mask]) / y_true_raw[mask])) * 100) if np.any(mask) else 0.0
+
+    today = datetime.utcnow().date()
+    forecasts = [
+        {"date": today + timedelta(days=i + 1), "price": round(float(p), 0)}
+        for i, p in enumerate(predictions_raw)
+    ]
+
+    return {
+        "forecasts": forecasts,
+        "metrics": {
+            "mae": round(mae, 2),
+            "rmse": round(rmse, 2),
+            "mape": round(mape, 2),
+            "prediction_updated_at": datetime.utcnow(),
+        },
+    }
+
+
 @app.get("/api/products-with-history")
 def list_products_with_history():
     """List all products that have enough price history for LSTM prediction."""
@@ -408,14 +431,10 @@ def get_product_history_api(
     product_url: str = Query(..., description="Product URL"),
     source: str = Query(..., description="Source name"),
 ):
-    """
-    Get the full price history for a single product, formatted for charting.
-    """
     history = get_product_price_history(product_url, source)
     if not history:
         return {"error": "No price history found for this product."}
 
-    # Format for charting libraries like Recharts or Chart.js
     chart_data = [
         {
             "time": entry.get("scraped_at").strftime("%Y-%m-%d"),
@@ -431,357 +450,11 @@ def get_product_statistics_api(
     product_url: str = Query(..., description="Product URL"),
     source: str = Query(..., description="Source name"),
 ):
-    """
-    Get pre-calculated price statistics for a single product.
-    """
     stats = get_price_statistics(product_url, source)
     if not stats:
         return {"error": "No statistics found for this product."}
     return stats
 
-
-# ─── MobileCity Full Crawl Endpoints ──────────────────────────────────
-
-def _crawl_mobilecity_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones và extract_all_comments_multithreaded cho MobileCity.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-            
-    products_data = []
-    try:
-        # Scraper không cần browser manager ban đầu vì các method con tự quản lý
-        scraper = MobileCityScraper(None)
-
-        # Step 1: Crawl all product listings (multi-threaded page scraping)
-        logger.info("Bắt đầu crawl TẤT CẢ sản phẩm từ MobileCity...")
-        products = scraper.crawl_all_phones()
-        logger.info(f"Đã crawl được {len(products)} sản phẩm từ MobileCity.")
-
-        # Step 2: Crawl comments in parallel (multi-threaded comment scraping)
-        if products:
-            products_data = scraper.extract_all_comments_multithreaded(products, max_workers=4)
-
-        logger.info(f"Crawl MobileCity hoàn tất: {len(products_data)} sản phẩm với comments.")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl MobileCity: {e}", exc_info=True)
-    return products_data
-
-
-@app.post("/api/crawl/mobilecity")
-async def crawl_mobilecity_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dien-thoai của MobileCity.
-    Lưu vào collection 'mobilecity' (riêng biệt).
-    """
-    init_mobilecity_collection()
-
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_mobilecity_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_mobilecity_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'mobilecity'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
-
-@app.get("/api/mobilecity/products")
-def list_mobilecity_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ MobileCity (collection 'mobilecity')."""
-    products = get_all_mobilecity_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
-
-
-# ─── Clickbuy Full Crawl Endpoints ────────────────────────────────────
-
-def _crawl_clickbuy_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones và extract_all_comments_multithreaded cho Clickbuy.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-            
-    products_data = []
-    try:
-        # Step 1: Crawl all product listings (single-threaded)
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = ClickbuyScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm từ Clickbuy...")
-            products = scraper.crawl_all_phones()
-            logger.info(f"Đã crawl được {len(products)} sản phẩm từ Clickbuy.")
-
-        # Step 2: Crawl comments in parallel (multi-threaded)
-        if products:
-            scraper_for_comments = ClickbuyScraper(None)
-            products_data = scraper_for_comments.extract_all_comments_multithreaded(products, max_workers=5)
-
-        logger.info(f"Crawl Clickbuy hoàn tất: {len(products_data)} sản phẩm với comments.")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl Clickbuy: {e}", exc_info=True)
-    return products_data
-
-
-@app.post("/api/crawl/clickbuy")
-async def crawl_clickbuy_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dien-thoai của Clickbuy.
-    Lưu vào collection 'clickbuy' (riêng biệt).
-    """
-    init_clickbuy_collection()
-
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_clickbuy_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_clickbuy_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'clickbuy'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
-
-@app.get("/api/clickbuy/products")
-def list_clickbuy_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ Clickbuy (collection 'clickbuy')."""
-    products = get_all_clickbuy_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
-
-
-# ─── Di Dong Viet Full Crawl Endpoints ────────────────────────────────
-
-def _crawl_didongviet_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones và extract_all_comments_multithreaded cho Di Động Việt.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-            
-    products_data = []
-    try:
-        # Step 1: Crawl all product listings (single-threaded)
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = DiDongVietScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm từ Di Động Việt...")
-            products = scraper.crawl_all_phones()
-            logger.info(f"Đã crawl được {len(products)} sản phẩm từ Di Động Việt.")
-
-        # Step 2: Crawl comments in parallel (multi-threaded)
-        if products:
-            scraper_for_comments = DiDongVietScraper(None)
-            products_data = scraper_for_comments.extract_all_comments_multithreaded(products, max_workers=5)
-
-        logger.info(f"Crawl Di Động Việt hoàn tất: {len(products_data)} sản phẩm với comments.")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl Di Động Việt: {e}", exc_info=True)
-    return products_data
-
-
-@app.post("/api/crawl/didongviet")
-async def crawl_didongviet_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dien-thoai.html của Di Động Việt.
-    Lưu vào collection 'didongviet' (riêng biệt).
-    """
-    init_didongviet_collection()
-
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_didongviet_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_didongviet_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'didongviet'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
-
-@app.get("/api/didongviet/products")
-def list_didongviet_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ Di Động Việt (collection 'didongviet')."""
-    products = get_all_didongviet_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
-
-
-# ─── ViettelStore Full Crawl Endpoints ────────────────────────────────
-
-def _crawl_viettelstore_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones (Playwright-based) trong thread.
-    Trả về list product dicts.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-            
-    products_data = []
-    try:
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = ViettelStoreScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm /dien-thoai từ Viettel Store...")
-
-            # 1. Crawl all products
-            products = scraper.crawl_all_phones()
-
-            # 2. Crawl comments for each product
-            logger.info(f"Bắt đầu cào comment cho {len(products)} sản phẩm Viettel Store...")
-            if hasattr(browser_manager, 'browser') and browser_manager.browser:
-                with browser_manager.browser.new_context() as context:
-                    for idx, prod in enumerate(products, 1):
-                        try:
-                            comments = scraper._extract_comments_viettel(context, prod.product_url)
-                            comments = comments[:300]
-                            logger.info(f"  [{idx}/{len(products)}] {prod.name[:40]}... -> {len(comments)} comments")
-                        except Exception as e:
-                            comments = []
-                            logger.warning(f"  [{idx}/{len(products)}] Không thể cào comment: {e}")
-
-                        products_data.append({
-                            "name": prod.name, "price": prod.price, "image_url": prod.image_url,
-                            "product_url": prod.product_url, "source": prod.source, "comments": comments,
-                        })
-            else:
-                logger.warning("Browser context not available, skipping comment extraction.")
-                for prod in products:
-                    products_data.append({
-                        "name": prod.name, "price": prod.price, "image_url": prod.image_url,
-                        "product_url": prod.product_url, "source": prod.source, "comments": [],
-                    })
-
-            logger.info(f"Crawl Viettel Store /dien-thoai hoàn tất: {len(products_data)} sản phẩm")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl Viettel Store /dien-thoai: {e}", exc_info=True)
-    return products_data
-
-
-@app.post("/api/crawl/viettelstore")
-async def crawl_viettelstore_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dien-thoai của Viettel Store.
-    Lưu vào collection 'viettelstore' (riêng biệt).
-    """
-    init_viettelstore_collection()
-
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_viettelstore_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_viettelstore_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'viettelstore'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
-
-
-@app.get("/api/viettelstore/products")
-def list_viettelstore_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ Viettel Store /dien-thoai (collection 'viettelstore')."""
-    products = get_all_viettelstore_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
-
-
-# ─── Hoang Ha Mobile Full Crawl Endpoints ───────────────────────────────
-
-def _crawl_hoangha_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones và extract_all_comments_multithreaded trong thread.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-            
-    products_data = []
-    try:
-        # Step 1: Crawl all product listings (single-threaded)
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = HoangHaMobileScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm từ Hoàng Hà Mobile...")
-            products = scraper.crawl_all_phones()
-            logger.info(f"Đã crawl được {len(products)} sản phẩm từ Hoàng Hà Mobile.")
-
-        # Step 2: Crawl comments in parallel (multi-threaded)
-        if products:
-            # Create a new scraper instance without a pre-existing browser manager
-            # as the multi-threaded method manages its own.
-            scraper_for_comments = HoangHaMobileScraper(None)
-            products_data = scraper_for_comments.extract_all_comments_multithreaded(products, max_workers=4)
-
-        logger.info(f"Crawl Hoàng Hà Mobile hoàn tất: {len(products_data)} sản phẩm với comments.")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl Hoàng Hà Mobile: {e}", exc_info=True)
-    return products_data
-
-
-@app.post("/api/crawl/hoangha")
-async def crawl_hoangha_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dien-thoai-di-dong của Hoàng Hà Mobile.
-    Lưu vào collection 'hoangha' (riêng biệt).
-    """
-    init_hoangha_collection()
-
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_hoangha_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_hoangha_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'hoangha'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
-
-@app.get("/api/hoangha/products")
-def list_hoangha_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ Hoàng Hà Mobile (collection 'hoangha')."""
-    products = get_all_hoangha_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
 
 @app.get("/api/price-history")
 def get_price_history(
@@ -789,28 +462,18 @@ def get_price_history(
     source: str = Query(..., description="Source name"),
     force_retrain: bool = Query(False, description="Force retrain LSTM (bypass cache)"),
 ):
-    """
-    Get price history + LSTM prediction for a product.
-
-    Strategy for speed:
-      1. Check cache first → return instantly if available
-      2. If no cache → train LSTM on-the-fly (fast, ~2-5s)
-      3. Cache result for next time
-    """
-    # 1. Check cache first (unless force_retrain)
+    cache_key = f"{source}:{product_url}"
     if not force_retrain:
-        cached = get_prediction(product_url, source)
-        if cached:
+        cached = _cache.get(cache_key)
+        if cached and datetime.utcnow() < cached["expire_at"]:
             logger.info("Returning cached prediction for %s/%s", source, product_url[:50])
             return {
                 "product_url": product_url,
                 "source": source,
                 "cached": True,
-                "prediction_updated_at": cached.get("prediction_updated_at"),
-                **cached["prediction"],
+                **cached["data"],
             }
 
-    # 2. Get price history from DB
     price_history = get_product_price_history(product_url, source)
     if not price_history:
         return {
@@ -819,8 +482,7 @@ def get_price_history(
             "error": "No price history found for this product",
         }
 
-    # 3. Train LSTM and predict
-    result = train_and_predict(price_history, predict_days=7)
+    result = _train_and_predict(price_history, predict_days=7)
     if result is None:
         return {
             "product_url": product_url,
@@ -829,8 +491,13 @@ def get_price_history(
             "history_count": len(price_history),
         }
 
-    # 4. Cache the prediction
-    save_prediction(product_url, source, result)
+    # Lưu forecast vào DB
+    try:
+        save_forecasts(product_url, source, result["forecasts"], result["metrics"])
+    except Exception as e:
+        logger.error(f"Không lưu được forecast: {e}")
+
+    _cache[cache_key] = {"data": result, "expire_at": datetime.utcnow() + CACHE_TTL}
 
     return {
         "product_url": product_url,
@@ -844,11 +511,6 @@ def get_price_history(
 
 @app.post("/api/chat")
 def chat_endpoint(message: Dict[str, Any]):
-    """
-    Chatbot endpoint for shopping assistant.
-    Accepts: {"message": "Tìm iPhone 16 Pro Max"}
-    Returns: {"text": "...", "intent": "search", "query": "iPhone 16 Pro Max"}
-    """
     user_message = message.get("message", "").strip()
     if not user_message:
         return {
@@ -869,15 +531,10 @@ def product_analysis(
     product_url: str = Query(..., description="Product URL"),
     source: str = Query(..., description="Source name"),
 ):
-    """
-    Phân tích tổng thể sản phẩm: PQS, thống kê giá, khuyến nghị mua hàng.
-    """
-    # Get product info from DB
     price_history = get_product_price_history(product_url, source)
     if not price_history:
         return {"error": "No data found for this product"}
 
-    # Get latest product info
     latest = price_history[-1] if price_history else {}
     product = {
         "name": latest.get("name", ""),
@@ -886,15 +543,12 @@ def product_analysis(
         "source": source,
     }
 
-    # Get forecast if available
     forecast_data = get_forecasts(product_url, source)
-    forecast_result = forecast_data # Needs adaptation in recommendation_engine
 
-    # Run full analysis
     result = analyze_product(
         product=product,
         comments=get_product_comments(product_url, source),
-        forecast_result=forecast_result,
+        forecast_result=forecast_data,
     )
     return result
 
@@ -904,9 +558,6 @@ def product_pqs(
     product_url: str = Query(..., description="Product URL"),
     source: str = Query(..., description="Source name"),
 ):
-    """
-    Tính Product Quality Score (PQS) cho một sản phẩm.
-    """
     price_history = get_product_price_history(product_url, source)
     if not price_history:
         return {"error": "No data found for this product"}
@@ -931,9 +582,6 @@ def price_statistics(
     product_url: str = Query(..., description="Product URL"),
     source: str = Query(..., description="Source name"),
 ):
-    """
-    Thống kê giá: min, max, avg, current, volatility.
-    """
     stats = calculate_price_statistics(product_url, source)
     if not stats:
         return {"error": "Not enough price history (need >=2 data points)"}
@@ -945,9 +593,6 @@ def buy_recommendation(
     product_url: str = Query(..., description="Product URL"),
     source: str = Query(..., description="Source name"),
 ):
-    """
-    Khuyến nghị mua hàng dựa trên PQS, giá, dự báo.
-    """
     price_history = get_product_price_history(product_url, source)
     if not price_history:
         return {"error": "No data found for this product"}
@@ -960,25 +605,20 @@ def buy_recommendation(
         "source": source,
     }
 
-    # Get PQS
     pqs_result = calculate_pqs(
         product=product,
         comments=get_product_comments(product_url, source),
     )
 
-    # Get price stats
     price_stats = calculate_price_statistics(product_url, source)
 
-    # Get forecast
     forecast_data = get_forecasts(product_url, source)
-    forecast_result = forecast_data # Needs adaptation in recommendation_engine
 
-    # Get recommendation
     recommendation = get_buy_recommendation(
         product=product,
         pqs_result=pqs_result,
         price_stats=price_stats,
-        forecast_result=forecast_result,
+        forecast_result=forecast_data,
     )
     return recommendation
 
@@ -987,9 +627,6 @@ def buy_recommendation(
 def products_ranked(
     query: str = Query(..., description="Search query"),
 ):
-    """
-    Danh sách sản phẩm xếp hạng theo PQS cho một query.
-    """
     products = get_latest_prices_for_query(query)
     if not products:
         return {"query": query, "total": 0, "products": []}
@@ -1002,13 +639,10 @@ def products_ranked(
     }
 
 
-# ─── CellphoneS Full Crawl Endpoints ────────────────────────────────────
+# ─── Full Crawl Endpoints (lazy import crawl4ai scrapers) ──────────────
 
-def _crawl_cellphones_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones trong thread (sync Playwright).
-    Trả về list product dicts.
-    """
+def _crawl_all_sync(scraper_cls, source_name: str) -> List[Dict[str, Any]]:
+    """Cào toàn bộ sản phẩm của 1 sàn bằng scraper crawl4ai."""
     if sys.platform == 'win32':
         try:
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -1017,210 +651,138 @@ def _crawl_cellphones_all_sync() -> List[Dict[str, Any]]:
 
     products_data = []
     try:
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = CellphoneSScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm /mobile.html từ CellphoneS...")
-            products = scraper.crawl_all_phones()
+        scraper = scraper_cls(headless=True)
+        logger.info(f"Bắt đầu crawl TẤT CẢ sản phẩm từ {source_name}...")
+        products = scraper.crawl_all_phones()
+        logger.info(f"Đã crawl được {len(products)} sản phẩm từ {source_name}.")
 
-            # Cào comment cho từng sản phẩm
-            logger.info(f"Bắt đầu cào comment cho {len(products)} sản phẩm CellphoneS...")
-            for idx, prod in enumerate(products, 1):
-                try:
-                    page = browser_manager.new_page()
-                    comments = scraper.extract_comments(page, prod.product_url)
-                    page.close()
-                    comments = comments[:300]
-                    logger.info(f"  [{idx}/{len(products)}] {prod.name[:40]}... -> {len(comments)} comments")
-                except Exception as e:
-                    comments = []
-                    logger.warning(f"  [{idx}/{len(products)}] Không thể cào comment: {e}")
+        # Cào comment cho từng sản phẩm
+        if products:
+            scraper._attach_comments(products, max_comments=300)
 
-                products_data.append({
-                    "name": prod.name,
-                    "price": prod.price,
-                    "image_url": prod.image_url,
-                    "product_url": prod.product_url,
-                    "source": prod.source,
-                    "comments": comments,
-                })
+        for prod in products:
+            products_data.append({
+                "name": prod.name,
+                "price": prod.price,
+                "image_url": prod.image_url,
+                "product_url": prod.product_url,
+                "source": prod.source,
+                "comments": getattr(prod, "comments", []),
+            })
 
-            logger.info(f"Crawl CellphoneS /mobile.html hoàn tất: {len(products_data)} sản phẩm")
+        logger.info(f"Crawl {source_name} hoàn tất: {len(products_data)} sản phẩm với comments.")
     except Exception as e:
-        logger.error(f"Lỗi khi crawl CellphoneS /mobile.html: {e}", exc_info=True)
+        logger.error(f"Lỗi khi crawl {source_name}: {e}", exc_info=True)
     return products_data
+
+
+async def _crawl_and_save(init_fn, save_fn, scraper_cls, source_name):
+    init_fn()
+    loop = asyncio.get_event_loop()
+    products = await loop.run_in_executor(None, _crawl_all_sync, scraper_cls, source_name)
+
+    if not products:
+        return {"message": f"Không cào được sản phẩm nào từ {source_name}", "total": 0}
+
+    saved = save_fn(products)
+    return {
+        "message": f"Đã cào và lưu {saved} sản phẩm vào collection '{source_name}'",
+        "total_crawled": len(products),
+        "total_saved": saved,
+    }
+
+
+@app.post("/api/crawl/mobilecity")
+async def crawl_mobilecity_all():
+    from scrapers.all_sites import MobileCityScraper
+    return await _crawl_and_save(init_mobilecity_collection, save_mobilecity_products, MobileCityScraper, "mobilecity")
+
+
+@app.get("/api/mobilecity/products")
+def list_mobilecity_products():
+    products = get_all_mobilecity_products()
+    return {"total": len(products), "products": products}
+
+
+@app.post("/api/crawl/clickbuy")
+async def crawl_clickbuy_all():
+    from scrapers.all_sites import ClickBuyScraper
+    return await _crawl_and_save(init_clickbuy_collection, save_clickbuy_products, ClickBuyScraper, "clickbuy")
+
+
+@app.get("/api/clickbuy/products")
+def list_clickbuy_products():
+    products = get_all_clickbuy_products()
+    return {"total": len(products), "products": products}
+
+
+@app.post("/api/crawl/didongviet")
+async def crawl_didongviet_all():
+    from scrapers.all_sites import DiDongVietScraper
+    return await _crawl_and_save(init_didongviet_collection, save_didongviet_products, DiDongVietScraper, "didongviet")
+
+
+@app.get("/api/didongviet/products")
+def list_didongviet_products():
+    products = get_all_didongviet_products()
+    return {"total": len(products), "products": products}
+
+
+@app.post("/api/crawl/viettelstore")
+async def crawl_viettelstore_all():
+    from scrapers.all_sites import ViettelStoreScraper
+    return await _crawl_and_save(init_viettelstore_collection, save_viettelstore_products, ViettelStoreScraper, "viettelstore")
+
+
+@app.get("/api/viettelstore/products")
+def list_viettelstore_products():
+    products = get_all_viettelstore_products()
+    return {"total": len(products), "products": products}
+
+
+@app.post("/api/crawl/hoangha")
+async def crawl_hoangha_all():
+    from scrapers.all_sites import HoangHaScraper
+    return await _crawl_and_save(init_hoangha_collection, save_hoangha_products, HoangHaScraper, "hoangha")
+
+
+@app.get("/api/hoangha/products")
+def list_hoangha_products():
+    products = get_all_hoangha_products()
+    return {"total": len(products), "products": products}
 
 
 @app.post("/api/crawl/cellphones")
 async def crawl_cellphones_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /mobile.html của CellphoneS.
-    Lưu vào collection 'cellphones' (riêng biệt).
-    """
-    from utils.db import init_cellphones_collection, save_cellphones_products
-    init_cellphones_collection()
-
-    # Chạy crawl trong thread pool (Playwright sync API)
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_cellphones_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_cellphones_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'cellphones'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
+    from scrapers.all_sites import CellphoneSScraper
+    return await _crawl_and_save(init_cellphones_collection, save_cellphones_products, CellphoneSScraper, "cellphones")
 
 
 @app.get("/api/cellphones/products")
 def list_cellphones_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ CellphoneS /mobile.html (collection 'cellphones')."""
-    from utils.db import get_all_cellphones_products
     products = get_all_cellphones_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
-
-
-# ─── TGDD Full Crawl Endpoints ─────────────────────────────────────────
-
-def _crawl_tgdd_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_dtdd trong thread (sync Playwright).
-    Trả về list product dicts.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-
-    products_data = []
-    try:
-        # Step 1: Crawl product list
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = TheGioiDiDongScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm /dtdd từ TGDD...")
-            products = scraper.crawl_all_dtdd()
-            logger.info(f"Đã crawl được {len(products)} sản phẩm từ TGDD.")
-        
-        # Step 2: Crawl comments multi-threaded
-        if products:
-            scraper_for_comments = TheGioiDiDongScraper(None)
-            products_data = scraper_for_comments.extract_all_comments_multithreaded(products, max_workers=4)
-
-        logger.info(f"Crawl TGDD /dtdd hoàn tất: {len(products_data)} sản phẩm")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl TGDD /dtdd: {e}", exc_info=True)
-    return products_data
+    return {"total": len(products), "products": products}
 
 
 @app.post("/api/crawl/tgdd")
 async def crawl_tgdd_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dtdd của Thế Giới Di Động.
-    Lưu vào collection 'tgdd' (riêng biệt).
-    """
-    init_tgdd_collection()
-
-    # Chạy crawl trong thread pool (Playwright sync API)
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_tgdd_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_tgdd_products(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'tgdd'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
+    from scrapers.all_sites import TGDDScraper
+    return await _crawl_and_save(init_tgdd_collection, save_tgdd_products, TGDDScraper, "tgdd")
 
 
 @app.get("/api/tgdd/products")
 def list_tgdd_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ TGDD /dtdd (collection 'tgdd')."""
     products = get_all_tgdd_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
-
-
-# ─── FPT Full Crawl Endpoints ──────────────────────────────────────────
-
-def _crawl_fpt_all_sync() -> List[Dict[str, Any]]:
-    """
-    Chạy crawl_all_phones trong thread (sync Playwright).
-    Trả về list product dicts.
-    """
-    if sys.platform == 'win32':
-        try:
-            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-        except Exception:
-            pass
-
-    products_data = []
-    try:
-        with BrowserManager(headless=True) as browser_manager:
-            scraper = FPTShopScraper(browser_manager)
-            logger.info("Bắt đầu crawl TẤT CẢ sản phẩm /dien-thoai từ FPT Shop...")
-            products = scraper.crawl_all_phones()
-            logger.info(f"Đã crawl được {len(products)} sản phẩm từ FPT Shop.")
-
-        # Step 2: Crawl comments in parallel (multi-threaded)
-        if products:
-            # Create a new scraper instance without a pre-existing browser manager
-            # as the multi-threaded method manages its own.
-            scraper_for_comments = FPTShopScraper(None)
-            products_data = scraper_for_comments.extract_all_comments_multithreaded(
-                products, max_workers=4, max_comments=300
-            )
-        else:
-            logger.warning("Không có sản phẩm nào để cào comment.")
-
-        if products_data:
-            logger.info(f"Crawl FPT /dien-thoai hoàn tất: {len(products_data)} sản phẩm")
-    except Exception as e:
-        logger.error(f"Lỗi khi crawl FPT /dien-thoai: {e}", exc_info=True)
-    return products_data
+    return {"total": len(products), "products": products}
 
 
 @app.post("/api/crawl/fpt")
 async def crawl_fpt_all():
-    """
-    Cào TẤT CẢ sản phẩm từ trang /dien-thoai của FPT Shop.
-    Lưu vào collection 'fpt' (riêng biệt).
-    """
-    init_fpt_collection()
-
-    # Chạy crawl trong thread pool (Playwright sync API)
-    loop = asyncio.get_event_loop()
-    products = await loop.run_in_executor(None, _crawl_fpt_all_sync)
-
-    if not products:
-        return {"message": "Không cào được sản phẩm nào", "total": 0}
-
-    saved = save_fpt_products_incremental(products)
-
-    return {
-        "message": f"Đã cào và lưu {saved} sản phẩm vào collection 'fpt'",
-        "total_crawled": len(products),
-        "total_saved": saved,
-    }
+    from scrapers.all_sites import FPTScraper
+    return await _crawl_and_save(init_fpt_collection, save_fpt_products_incremental, FPTScraper, "fpt")
 
 
 @app.get("/api/fpt/products")
 def list_fpt_products():
-    """Liệt kê tất cả sản phẩm đã crawl từ FPT Shop /dien-thoai (collection 'fpt')."""
     products = get_all_fpt_products()
-    return {
-        "total": len(products),
-        "products": products,
-    }
+    return {"total": len(products), "products": products}
