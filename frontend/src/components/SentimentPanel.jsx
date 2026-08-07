@@ -35,28 +35,21 @@ export default function SentimentPanel({ product }) {
       if (res.data && res.data.error) {
         setSentiment(null);
         setError(res.data.error);
+        return false;
       } else {
         setSentiment(res.data);
         setError(null);
+        return true;
       }
     } catch (err) {
       // Backend down hoặc chưa có kết quả — để hiện nút phân tích
       setSentiment(null);
       setError('no-result');
+      return false;
     } finally {
       setLoading(false);
     }
   };
-
-  useEffect(() => {
-    if (product.product_url && product.source) {
-      fetchResult();
-    } else {
-      setLoading(false);
-      setError('no-result');
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [product.product_url, product.source]);
 
   const handleAnalyze = async () => {
     setAnalyzing(true);
@@ -78,6 +71,29 @@ export default function SentimentPanel({ product }) {
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    const init = async () => {
+      if (!product.product_url || !product.source) {
+        setLoading(false);
+        setError('no-result');
+        return;
+      }
+      const hasResult = await fetchResult();
+      if (cancelled) return;
+      // Chưa có kết quả và sản phẩm có comments → TỰ ĐỘNG phân tích PhoBERT
+      // (không cần user bấm nút thủ công)
+      if (!hasResult && (product.comments || []).length > 0) {
+        await handleAnalyze();
+      }
+    };
+    init();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product.product_url, product.source]);
+
   // Đang tải
   if (loading) {
     return (
@@ -87,19 +103,28 @@ export default function SentimentPanel({ product }) {
     );
   }
 
-  // Chưa có kết quả → hiện nút phân tích
+  // Chưa có kết quả → hiện trạng thái phân tích hoặc nút phân tích thủ công
   if (!sentiment) {
     return (
       <div className="sentiment-empty">
         <span className="sentiment-empty-emoji">🧠</span>
-        <span className="sentiment-empty-text">Chưa phân tích cảm xúc bình luận (PhoBERT)</span>
-        <button
-          className="sentiment-analyze-btn"
-          onClick={handleAnalyze}
-          disabled={analyzing}
-        >
-          {analyzing ? 'Đang phân tích...' : '🔬 Phân tích bằng PhoBERT'}
-        </button>
+        {analyzing ? (
+          <div className="sentiment-analyzing">
+            <div className="inline-chart-spinner"></div>
+            <span className="sentiment-empty-text">Đang phân tích cảm xúc bình luận bằng PhoBERT...</span>
+          </div>
+        ) : (
+          <>
+            <span className="sentiment-empty-text">Chưa phân tích cảm xúc bình luận (PhoBERT)</span>
+            <button
+              className="sentiment-analyze-btn"
+              onClick={handleAnalyze}
+              disabled={analyzing}
+            >
+              🔬 Phân tích bằng PhoBERT
+            </button>
+          </>
+        )}
         {error && error !== 'no-result' && (
           <span className="sentiment-error">⚠️ {error}</span>
         )}
