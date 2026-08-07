@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Trích xuất tất cả bình luận (comments) từ MongoDB để train PhoBERT."""
+"""Trích xuất bình luận (comments) từ MongoDB để train PhoBERT.
+
+Mặc định chỉ đọc collection 'products' (nguồn dữ liệu chính được tích lũy
+qua save_search_results / crawl-to-products). Muốn gộp thêm comments từ các
+collection riêng của từng sàn (tgdd, fpt, ...), dùng --all-collections.
+"""
 import argparse
 import json
 import logging
@@ -20,7 +25,10 @@ from utils.db import get_db
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-PRODUCT_COLLECTIONS = [
+# Mặc định: chỉ lấy comments từ collection 'products' (đúng pipeline train PhoBERT
+# từ dữ liệu sản phẩm đã cào). Mở rộng bằng --all-collections.
+PRODUCT_COLLECTIONS = ["products"]
+ALL_COLLECTIONS = [
     "products", "tgdd", "fpt", "cellphones", "hoangha",
     "didongviet", "viettelstore", "clickbuy", "mobilecity",
 ]
@@ -42,11 +50,17 @@ def _to_text(comment) -> str:
     return str(comment).strip()
 
 
-def export_comments(output_path: str, min_length: int = 2, dedupe: bool = True) -> int:
+def export_comments(
+    output_path: str,
+    min_length: int = 2,
+    dedupe: bool = True,
+    all_collections: bool = False,
+) -> int:
     db = get_db()
     records, seen = [], set()
 
-    for coll_name in PRODUCT_COLLECTIONS:
+    colls = ALL_COLLECTIONS if all_collections else PRODUCT_COLLECTIONS
+    for coll_name in colls:
         col = db[coll_name]
         logger.info("Quét '%s' (%d docs)...", coll_name, col.count_documents({}))
         batch = 0
@@ -85,9 +99,20 @@ def main():
     parser.add_argument("--output", default=os.path.join("scripts", "output", "train_comments.json"))
     parser.add_argument("--min-length", type=int, default=2)
     parser.add_argument("--no-dedupe", action="store_true")
+    parser.add_argument(
+        "--all-collections",
+        action="store_true",
+        help="Quét thêm comments từ các collection riêng của từng sàn (tgdd, fpt, ...). "
+             "Mặc định chỉ đọc collection 'products'.",
+    )
     args = parser.parse_args()
 
-    count = export_comments(args.output, args.min_length, not args.no_dedupe)
+    count = export_comments(
+        args.output,
+        args.min_length,
+        not args.no_dedupe,
+        all_collections=args.all_collections,
+    )
 
     with open(args.output, "r", encoding="utf-8") as f:
         records = json.load(f)
