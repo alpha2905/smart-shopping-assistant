@@ -17,6 +17,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from utils.db import (
     init_db, save_search_results, get_unique_queries, close_db,
     get_product_price_history, get_products_with_price_history, get_price_statistics, get_latest_prices_for_query,
+    search_products_by_name,
     get_product_comments,
     init_tgdd_collection, save_tgdd_products, get_all_tgdd_products,
     init_fpt_collection, save_fpt_products_incremental, get_all_fpt_products,
@@ -390,9 +391,11 @@ def search_products(
             }
 
     # Chỉ đọc từ DB — KHÔNG trigger crawl khi user search.
+    # Tìm theo TÊN sản phẩm (field `name`) trong collection `products`,
+    # so khớp với query user → chọn top 3 sàn rẻ nhất.
     # Dữ liệu được thu thập riêng qua /api/crawl/* hoặc scheduler chạy ngầm.
-    cached_in_db = get_latest_prices_for_query(cache_key)
-    filtered_db = filter_comparable_phones(cached_in_db, q)
+    db_products = search_products_by_name(q)
+    filtered_db = filter_comparable_phones(db_products, q)
     _cache[cache_key] = {"data": filtered_db, "expire_at": now + CACHE_TTL}
     return {
         "query": q,
@@ -427,10 +430,10 @@ async def search_products_stream(
                 yield f"event: done\ndata: {json.dumps({'total': len(filtered_memory), 'query': q, 'cached': True, 'products': filtered_memory}, ensure_ascii=False, default=str)}\n\n"
             return StreamingResponse(cached_stream_in_memory(), media_type="text/event-stream")
 
-    # Đọc từ DB → lọc top 3 giá rẻ nhất khớp query
-    cached_in_db = get_latest_prices_for_query(cache_key)
-    filtered_db = filter_comparable_phones(cached_in_db, q)
-    logger.info("Stream search: query='%s' → %d sản phẩm từ DB", q, len(filtered_db))
+    # Đọc từ DB theo TÊN sản phẩm → lọc top 3 sàn rẻ nhất khớp query
+    db_products = search_products_by_name(q)
+    filtered_db = filter_comparable_phones(db_products, q)
+    logger.info("Stream search: query='%s' → %d sản phẩm từ DB (theo tên)", q, len(filtered_db))
     _cache[cache_key] = {"data": filtered_db, "expire_at": now + CACHE_TTL}
 
     async def cached_stream_db():

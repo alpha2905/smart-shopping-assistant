@@ -485,6 +485,69 @@ def get_latest_prices_for_query(query: str) -> List[Dict[str, Any]]:
     return results
 
 
+def search_products_by_name(query: str, limit_candidates: int = 800) -> List[Dict[str, Any]]:
+    """Tìm sản phẩm trong collection 'products' theo TÊN sản phẩm (field `name`),
+    không phụ thuộc field `query` đã lưu.
+
+    - Dựng regex thô từ các token của query (gốc + biến thể mở rộng) để giảm
+      tập ứng viên trước khi đọc từ MongoDB.
+    - Dùng matches_query_exact để khớp chính xác (bỏ dấu, mở rộng viết tắt,
+      kiểm tra dung lượng/màu nếu user nhập).
+    - Trả về payload tương tự get_latest_prices_for_query + price_numeric
+      để filter_comparable_phones chọn top 3 sàn rẻ nhất.
+
+    Ví dụ: query "ip 17" → expand_query → "iphone 17" → khớp các doc có
+    name chứa "iphone 17" dù query lưu trong DB là "iPhone 17 Pro Max".
+    """
+    from utils.search_filter import expand_query, matches_query_exact
+
+    col = get_collection()
+    results = []
+
+    # Các biến thể query cần thử (gốc + mở rộng viết tắt)
+    queries_to_try = expand_query(query)
+
+    # Regex thô: token đặc trưng (≥2 ký tự) của tất cả biến thể → filter trên `name`
+    tokens: Dict[str, bool] = {}
+    for q in queries_to_try:
+        for tok in q.lower().split():
+            if len(tok) >= 2:
+                tokens[tok] = True
+    name_regex = re.compile("|".join(re.escape(t) for t in tokens.keys()), re.IGNORECASE) if tokens else None
+
+    query_filter: Dict[str, Any] = {"name": name_regex} if name_regex else {}
+    cursor = col.find(query_filter).limit(limit_candidates)
+
+    for doc in cursor:
+        name = doc.get("name", "")
+        if not any(matches_query_exact(name, q) for q in queries_to_try):
+            continue
+
+        price_history = doc.get("price_history", [])
+        latest = price_history[-1] if price_history else {}
+        price_str = latest.get("price", "")
+        price_val = latest.get("price_value", parse_price(price_str)) or parse_price(price_str)
+
+        results.append({
+            "product_url": doc.get("product_url", ""),
+            "source": doc.get("source", ""),
+            "name": name,
+            "image_url": doc.get("image_url", ""),
+            "query": doc.get("query", ""),
+            "last_scraped_at": doc.get("last_scraped_at"),
+            "price": price_str,
+            "price_value": price_val,
+            "price_numeric": price_val,
+            "scraped_at": latest.get("scraped_at"),
+            "comments": doc.get("comments", []),
+            "comments_count": doc.get("comments_count", 0),
+            "average_price": doc.get("average_price"),
+            "price_history_count": len(price_history),
+        })
+
+    return results
+
+
 def get_products_with_price_history(min_history: int = 3) -> List[Dict[str, Any]]:
     """Return products that have at least `min_history` price entries from ALL collections."""
     db = get_db()
