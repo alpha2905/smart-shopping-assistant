@@ -1,5 +1,6 @@
 import React, { useState, useRef } from 'react';
 import PriceChart from './PriceChart';
+import SentimentPanel from './SentimentPanel';
 
 // Backend URL (Vite proxy có thể không hoạt động nếu chạy port khác 3000)
 const API_BASE = 'http://localhost:8000';
@@ -210,6 +211,9 @@ export default function SearchProduct() {
 
           {/* Biểu đồ LSTM inline - tự động hiển thị */}
           <PriceChart product={prod} />
+
+          {/* Phân tích cảm xúc bình luận bằng PhoBERT */}
+          <SentimentPanel product={prod} />
         </div>
       </div>
     );
