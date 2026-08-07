@@ -8,6 +8,7 @@ Single collection "products":
 
 import os
 import logging
+import html
 from datetime import datetime, timedelta
 import re
 from typing import List, Dict, Any, Optional
@@ -522,6 +523,8 @@ def search_products_by_name(query: str, limit_candidates: int = 800) -> List[Dic
         name = doc.get("name", "")
         if not any(matches_query_exact(name, q) for q in queries_to_try):
             continue
+        # Decode HTML entities (vd: "Ch&#237;nh h&#227;ng" -> "Chính hãng")
+        name = html.unescape(name)
 
         price_history = doc.get("price_history", [])
         latest = price_history[-1] if price_history else {}

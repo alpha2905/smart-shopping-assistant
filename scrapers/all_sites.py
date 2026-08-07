@@ -3,6 +3,7 @@ Gộp 8 scraper sàn điện thoại — TẤT CẢ dùng crawl4ai.
 Mỗi sàn override _parse_products / _parse_comments.
 """
 from typing import List, Optional
+import html
 from bs4 import BeautifulSoup
 from models.product import Product
 from scrapers.base_scraper import BaseScraper, clean_price, normalize_text
@@ -179,7 +180,7 @@ class HoangHaScraper(BaseScraper):
             a = item.select_one("a[href]")
             if not h3 or not a:
                 continue
-            name = (h3.get_text(strip=True) or a.get("title") or "").strip()
+            name = html.unescape((h3.get_text(strip=True) or a.get("title") or "").strip())
             href = self._abs_url(self.base_url, a.get("href", ""))
             if not name or not href:
                 continue
