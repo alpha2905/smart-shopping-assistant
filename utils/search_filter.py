@@ -311,7 +311,7 @@ def _strip_internal_fields(product: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def filter_comparable_phones(products: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+def filter_comparable_phones(products: List[Dict[str, Any]], query: str, top_n: int = 3) -> List[Dict[str, Any]]:
     """
     Lọc kết quả scrape:
     1. Chỉ giữ điện thoại
@@ -412,18 +412,31 @@ def filter_comparable_phones(products: List[Dict[str, Any]], query: str) -> List
     for (source, canonical_key) in cheapest_per_source_key:
         key_sources[canonical_key].add(source)
 
-    # Chọn canonical key xuất hiện trên nhiều sàn nhất (ưu tiên khớp query)
+    # Xếp hạng các canonical key: số sàn giảm dần → khớp query → thứ tự chữ cái
     query_key = build_canonical_key(query, query)
-    best_key = max(
+    ranked_keys = sorted(
         key_sources.keys(),
         key=lambda k: (len(key_sources[k]), k == query_key, k),
+        reverse=True,
     )
 
-    results = [
-        _strip_internal_fields(prod)
+    # Chọn canonical key tốt nhất: xuất hiện trên nhiều sàn nhất
+    # (ưu tiên key khớp chính xác query)
+    if not ranked_keys:
+        return []
+    best_key = ranked_keys[0]
+
+    # Lấy tất cả sản phẩm cùng 1 biến thể/model (khớp tên nhau),
+    # sắp theo giá tăng dần để chọn rẻ nhất
+    same_variant = [
+        prod
         for (source, canonical_key), prod in cheapest_per_source_key.items()
         if canonical_key == best_key
     ]
+    same_variant.sort(key=lambda p: p["_price_numeric"])
+
+    # Trả về tối đa top_n sản phẩm RẺ NHẤT cùng model
+    results = [_strip_internal_fields(p) for p in same_variant[:top_n]]
 
     # Sắp xếp theo giá tăng dần để dễ so sánh
     results.sort(key=lambda p: p.get("price_numeric") or 0)

@@ -1,12 +1,14 @@
 import logging
 import sys
 import json
+from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Tuple
 from fastapi import FastAPI, Query
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import asyncio
+import torch
 from datetime import datetime, timedelta
 
 # APScheduler cho tác vụ định kỳ
@@ -25,21 +27,78 @@ from utils.db import (
     init_didongviet_collection, save_didongviet_products, get_all_didongviet_products,
     init_cellphones_collection, save_cellphones_products, get_all_cellphones_products,
     parse_price, init_forecast_collection, save_forecasts, get_forecasts, init_sentiment_collection, get_sentiment_result)
-from utils.chatbot import get_chat_response
+from ai.rag.pipeline import get_chat_response_rag
+from ai.sentiment.service import analyze_and_save_product_sentiment
 from utils.recommendation_engine import (
     calculate_pqs, calculate_price_statistics, get_buy_recommendation,
     analyze_product, analyze_products_batch,
 )
-from utils.search_filter import filter_comparable_phones
+from utils.search_filter import filter_comparable_phones, expand_query
+from train_lstm_gpu import get_or_train_model, create_sequences, DEVICE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Multi-Platform Product Search API", version="1.2")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Quản lý vòng đời app: khởi tạo DB + scheduler khi start, dọn dẹp khi tắt."""
+    init_sentiment_collection()
+    init_forecast_collection()
+    init_db()
+
+    scheduler.add_job(
+        scheduled_scrape_all,
+        "interval",
+        hours=1,
+        id="hourly_scrape",
+        replace_existing=True,
+        next_run_time=None,
+    )
+    scheduler.start()
+    logger.info("Scheduler started: sẽ scrape lại tất cả query mỗi 2 giờ")
+
+    try:
+        yield
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+            logger.info("Scheduler stopped")
+        close_db()
+
+
+app = FastAPI(title="Multi-Platform Product Search API", version="1.2", lifespan=lifespan)
+
+
+@app.get("/")
+def root():
+    """Endpoint gốc: xác nhận BE đang chạy và liệt kê các API chính."""
+    return {
+        "name": "Multi-Platform Product Search API",
+        "version": app.version,
+        "status": "running",
+        "docs": "/docs",
+        "endpoints": [
+            "/api/search?q=<từ khóa>",
+            "/api/search/stream?q=<từ khóa>",
+            "/api/product-history?product_url=...&source=...",
+            "/api/price-history?product_url=...&source=...",
+            "/api/chat",
+            "/api/sentiment/analyze?product_url=...&source=...",
+            "/api/crawl/*",
+        ],
+    }
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001", "http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3001",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,6 +107,11 @@ app.add_middleware(
 # ─── In-memory cache ───────────────────────────────────────────────────
 CACHE_TTL = timedelta(hours=1)
 _cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _norm_query_key(q: str) -> str:
+    """Chuẩn hóa query để dùng chung cache/DB key (không phân biệt hoa/thường)."""
+    return q.strip().lower()
 
 # ─── Scheduler chạy ngầm ────────────────────────────────────────────────
 scheduler = BackgroundScheduler()
@@ -151,37 +215,22 @@ def scheduled_scrape_all():
         logger.error(f"Lỗi scheduled scrape: {e}", exc_info=True)
 
 
-# ─── Sự kiện vòng đời FastAPI ──────────────────────────────────────────
-
-@app.on_event("startup")
-def startup():
-    """Khởi tạo DB + scheduler khi app start."""
-    init_sentiment_collection()
-    init_forecast_collection()
-    init_db()
-
-    scheduler.add_job(
-        scheduled_scrape_all,
-        "interval",
-        hours=1,
-        id="hourly_scrape",
-        replace_existing=True,
-        next_run_time=None,
-    )
-    scheduler.start()
-    logger.info("Scheduler started: sẽ scrape lại tất cả query mỗi 1 giờ")
-
-
-@app.on_event("shutdown")
-def shutdown():
-    """Dọn dẹp khi app tắt."""
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
-        logger.info("Scheduler stopped")
-    close_db()
-
-
 # ─── API Endpoint ──────────────────────────────────────────────────────
+
+def _resolve_scrape_query(q: str) -> str:
+    """
+    Mở rộng query viết tắt thành dạng đầy đủ để các sàn tìm kiếm hiểu.
+    VD: "ip 17" → "iphone 17", "ss s24" → "samsung galaxy s24".
+
+    Nếu query gốc đã đầy đủ hoặc không có biến thể mở rộng, giữ nguyên q.
+    """
+    queries = expand_query(q)
+    if len(queries) > 1:
+        expanded = queries[1]
+        logger.info("Query '%s' được mở rộng thành '%s' để scrape", q, expanded)
+        return expanded
+    return q
+
 
 @app.get("/api/search")
 def search_products(
@@ -189,9 +238,10 @@ def search_products(
     force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
 ):
     now = datetime.utcnow()
+    cache_key = _norm_query_key(q)
 
     if not force_refresh:
-        cached_in_memory = _cache.get(q)
+        cached_in_memory = _cache.get(cache_key)
         if cached_in_memory and now < cached_in_memory["expire_at"]:
             logger.info("Query '%s' found in in-memory cache, returning %d products.", q, len(cached_in_memory["data"]))
             return {
@@ -201,10 +251,10 @@ def search_products(
                 "cached": True,
             }
 
-        cached_in_db = get_latest_prices_for_query(q)
+        cached_in_db = get_latest_prices_for_query(cache_key)
         if cached_in_db:
             logger.info("Query '%s' found in DB, returning %d cached products instantly", q, len(cached_in_db))
-            _cache[q] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
+            _cache[cache_key] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
             return {
                 "query": q,
                 "total": len(cached_in_db),
@@ -213,9 +263,9 @@ def search_products(
             }
 
     logger.info("Query '%s' not in cache (or force_refresh), scraping from stores...", q)
-    all_products = scrape_and_save(q)
+    all_products = scrape_and_save(_resolve_scrape_query(q))
 
-    _cache[q] = {"data": all_products, "expire_at": now + CACHE_TTL}
+    _cache[cache_key] = {"data": all_products, "expire_at": now + CACHE_TTL}
 
     return {
         "query": q,
@@ -242,24 +292,43 @@ async def search_products_stream(
     force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
 ):
     now = datetime.utcnow()
+    cache_key = _norm_query_key(q)
+
+    # Mở rộng query viết tắt (vd: "ip 17" → "iphone 17") để các sàn hiểu.
+    # Nếu có thể mở rộng, bỏ qua cache rỗng đã lưu từ lần gõ viết tắt trước đó.
+    queries_to_try = expand_query(q)
+    scrape_query = queries_to_try[1] if len(queries_to_try) > 1 else q
+    can_expand = scrape_query != q
+    logger.info("Stream search: query='%s', scrape_query='%s'", q, scrape_query)
 
     if not force_refresh:
-        cached_in_memory = _cache.get(q)
-        if cached_in_memory and now < cached_in_memory["expire_at"]:
+        cached_in_memory = _cache.get(cache_key)
+        if (
+            cached_in_memory
+            and now < cached_in_memory["expire_at"]
+            and (cached_in_memory["data"] or not can_expand)
+        ):
             logger.info("Query '%s' found in in-memory cache, streaming %d products", q, len(cached_in_memory["data"]))
+            # Lọc top 3 giá rẻ nhất khớp query
+            filtered_memory = filter_comparable_phones(cached_in_memory["data"], q)
+            logger.info("In-memory cache: %d raw → %d top-3 products", len(cached_in_memory["data"]), len(filtered_memory))
             async def cached_stream_in_memory():
-                yield f"event: cached\ndata: {json.dumps({'total': len(cached_in_memory['data']), 'products': cached_in_memory['data']}, ensure_ascii=False, default=str)}\n\n"
-                yield f"event: done\ndata: {json.dumps({'total': len(cached_in_memory['data']), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
+                yield f"event: cached\ndata: {json.dumps({'total': len(filtered_memory), 'products': filtered_memory}, ensure_ascii=False, default=str)}\n\n"
+                yield f"event: done\ndata: {json.dumps({'total': len(filtered_memory), 'query': q, 'cached': True, 'products': filtered_memory}, ensure_ascii=False, default=str)}\n\n"
             return StreamingResponse(cached_stream_in_memory(), media_type="text/event-stream")
 
-        cached_in_db = get_latest_prices_for_query(q)
-        if cached_in_db:
-            logger.info("Query '%s' found in DB, streaming %d cached products", q, len(cached_in_db))
-            _cache[q] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
-            async def cached_stream_db():
-                yield f"event: cached\ndata: {json.dumps({'total': len(cached_in_db), 'products': cached_in_db}, ensure_ascii=False, default=str)}\n\n"
-                yield f"event: done\ndata: {json.dumps({'total': len(cached_in_db), 'query': q, 'cached': True}, ensure_ascii=False)}\n\n"
-            return StreamingResponse(cached_stream_db(), media_type="text/event-stream")
+        cached_in_db = get_latest_prices_for_query(cache_key)
+        if cached_in_db or not can_expand:
+            if cached_in_db:
+                logger.info("Query '%s' found in DB, streaming %d cached products", q, len(cached_in_db))
+                _cache[cache_key] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
+                # Lọc top 3 giá rẻ nhất khớp query
+                filtered_db = filter_comparable_phones(cached_in_db, q)
+                logger.info("DB cache: %d raw → %d top-3 products", len(cached_in_db), len(filtered_db))
+                async def cached_stream_db():
+                    yield f"event: cached\ndata: {json.dumps({'total': len(filtered_db), 'products': filtered_db}, ensure_ascii=False, default=str)}\n\n"
+                    yield f"event: done\ndata: {json.dumps({'total': len(filtered_db), 'query': q, 'cached': True, 'products': filtered_db}, ensure_ascii=False, default=str)}\n\n"
+                return StreamingResponse(cached_stream_db(), media_type="text/event-stream")
 
     max_products = 15
     scraper_classes = _get_scraper_classes()
@@ -268,7 +337,7 @@ async def search_products_stream(
         all_products = []
 
         tasks = [
-            asyncio.ensure_future(_run_scraper_async(sc, q, max_products))
+            asyncio.ensure_future(_run_scraper_async(sc, scrape_query, max_products))
             for sc in scraper_classes
         ]
 
@@ -302,16 +371,17 @@ async def search_products_stream(
             )
 
             if all_products:
-                save_search_results(q, all_products)
+                save_search_results(cache_key, all_products)
 
-            _cache[q] = {"data": all_products, "expire_at": datetime.utcnow() + CACHE_TTL}
+            _cache[cache_key] = {"data": all_products, "expire_at": datetime.utcnow() + CACHE_TTL}
 
             done_data = {
-                "total": len(all_products),
+                "total": len(filtered_products),
                 "query": q,
                 "cached": False,
+                "products": filtered_products,
             }
-            yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False)}\n\n"
+            yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False, default=str)}\n\n"
 
         except Exception as e:
             logger.error(f"Lỗi nghiêm trọng trong SSE stream: {e}", exc_info=True)
@@ -333,13 +403,21 @@ def _create_sequences(data, seq_length: int):
     return X, y
 
 
-def _train_and_predict(price_history: List[Dict[str, Any]], predict_days: int = 7):
+def _train_and_predict(
+    price_history: List[Dict[str, Any]],
+    product_url: str,
+    source: str,
+    predict_days: int = 7,
+    force_retrain: bool = False,
+):
     """
-    Huấn luyện LSTM nhanh và dự báo giá (lazy import tensorflow).
+    Huấn luyện LSTM (PyTorch) và dự báo giá, dùng cache model theo data_hash.
+
+    Model chỉ được train lại khi dữ liệu giá thực sự thay đổi (data_hash khác),
+    còn lại tái sử dụng model đã lưu trên đĩa (saved_models/lstm_gpu/).
     Trả về dict kết quả hoặc None nếu không đủ dữ liệu.
     """
     import numpy as np
-    from sklearn.preprocessing import MinMaxScaler
 
     prices = []
     for h in price_history:
@@ -351,53 +429,49 @@ def _train_and_predict(price_history: List[Dict[str, Any]], predict_days: int = 
         return None
 
     prices_raw = np.array(prices).reshape(-1, 1)
-    scaler = MinMaxScaler()
-    prices_norm = scaler.fit_transform(prices_raw).flatten()
 
-    X, y = _create_sequences(prices_norm, SEQ_LENGTH)
-    if not X:
+    # get_or_train_model: fit scaler + train model (nếu data_hash thay đổi) hoặc tái sử dụng model đã lưu
+    model, scaler, trained_epochs = get_or_train_model(
+        prices_raw,
+        product_url=product_url,
+        source=source,
+        seq_length=SEQ_LENGTH,
+        epochs=50,
+        batch_size=4,
+        force_retrain=force_retrain,
+    )
+    if model is None or scaler is None:
         return None
 
-    X = np.array(X).reshape((len(X), SEQ_LENGTH, 1))
-    y = np.array(y)
+    prices_norm = scaler.transform(prices_raw).flatten()
 
-    # Lazy import tensorflow để tránh lỗi khi chạy CI/tests
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Input, Dropout
-    from tensorflow.keras.optimizers import Adam
-
-    model = Sequential([
-        Input(shape=(SEQ_LENGTH, 1)),
-        LSTM(64, return_sequences=True),
-        Dropout(0.2),
-        LSTM(32, return_sequences=False),
-        Dropout(0.2),
-        Dense(16, activation="relu"),
-        Dense(1),
-    ])
-    model.compile(optimizer=Adam(learning_rate=0.01), loss="mse")
-    model.fit(X, y, epochs=50, batch_size=4, verbose=0)
-
-    # Dự báo
+    # Dự báo tương lai (recursive)
+    model.eval()
     last_sequence = prices_norm[-SEQ_LENGTH:].copy()
     predictions_norm = []
-    for _ in range(predict_days):
-        input_seq = last_sequence.reshape((1, SEQ_LENGTH, 1))
-        pred_norm = model.predict(input_seq, verbose=0)[0][0]
-        predictions_norm.append(pred_norm)
-        last_sequence = np.append(last_sequence[1:], pred_norm)
+    with torch.no_grad():
+        for _ in range(predict_days):
+            input_seq = torch.from_numpy(last_sequence.reshape(1, SEQ_LENGTH, 1).astype(np.float32)).to(DEVICE)
+            pred_norm = model(input_seq).cpu().numpy()[0][0]
+            predictions_norm.append(pred_norm)
+            last_sequence = np.append(last_sequence[1:], pred_norm)
 
     predictions_raw = scaler.inverse_transform(np.array(predictions_norm).reshape(-1, 1)).flatten()
 
-    # Metrics
-    y_pred_train_norm = model.predict(X, verbose=0)
-    y_pred_train_raw = scaler.inverse_transform(y_pred_train_norm)
-    y_true_raw = prices_raw[SEQ_LENGTH:]
-    mae = float(np.mean(np.abs(y_true_raw - y_pred_train_raw)))
-    rmse = float(np.sqrt(np.mean((y_true_raw - y_pred_train_raw) ** 2)))
-    mask = y_true_raw != 0
-    mape = float(np.mean(np.abs((y_true_raw[mask] - y_pred_train_raw[mask]) / y_true_raw[mask])) * 100) if np.any(mask) else 0.0
+    # Metrics trên tập huấn luyện (backtest) — chỉ để tham khảo
+    X, y = create_sequences(prices_norm, SEQ_LENGTH)
+    if X:
+        X_arr = np.array(X).reshape((len(X), SEQ_LENGTH, 1)).astype(np.float32)
+        with torch.no_grad():
+            y_pred_train_norm = model(torch.from_numpy(X_arr).to(DEVICE)).cpu().numpy()
+        y_pred_train_raw = scaler.inverse_transform(y_pred_train_norm)
+        y_true_raw = prices_raw[SEQ_LENGTH:]
+        mae = float(np.mean(np.abs(y_true_raw - y_pred_train_raw)))
+        rmse = float(np.sqrt(np.mean((y_true_raw - y_pred_train_raw) ** 2)))
+        mask = y_true_raw != 0
+        mape = float(np.mean(np.abs((y_true_raw[mask] - y_pred_train_raw[mask]) / y_true_raw[mask])) * 100) if np.any(mask) else 0.0
+    else:
+        mae = rmse = mape = 0.0
 
     today = datetime.utcnow().date()
     forecasts = [
@@ -411,6 +485,7 @@ def _train_and_predict(price_history: List[Dict[str, Any]], predict_days: int = 
             "mae": round(mae, 2),
             "rmse": round(rmse, 2),
             "mape": round(mape, 2),
+            "trained_epochs": trained_epochs,
             "prediction_updated_at": datetime.utcnow(),
         },
     }
@@ -482,7 +557,13 @@ def get_price_history(
             "error": "No price history found for this product",
         }
 
-    result = _train_and_predict(price_history, predict_days=7)
+    result = _train_and_predict(
+        price_history,
+        product_url=product_url,
+        source=source,
+        predict_days=7,
+        force_retrain=force_retrain,
+    )
     if result is None:
         return {
             "product_url": product_url,
@@ -497,13 +578,38 @@ def get_price_history(
     except Exception as e:
         logger.error(f"Không lưu được forecast: {e}")
 
-    _cache[cache_key] = {"data": result, "expire_at": datetime.utcnow() + CACHE_TTL}
+    # Chuẩn bị dữ liệu cho biểu đồ frontend (PriceChart.jsx mong đợi history + predictions)
+    history = [
+        {
+            "date": entry.get("scraped_at").isoformat() if entry.get("scraped_at") else None,
+            "price": entry.get("price_value", parse_price(entry.get("price"))),
+        }
+        for entry in price_history
+        if entry.get("price_value", parse_price(entry.get("price"))) > 0
+    ]
+    predictions = [
+        {
+            "date": f.isoformat() if hasattr(f.get("date"), "isoformat") else f.get("date"),
+            "price": f.get("price"),
+        }
+        for f in result["forecasts"]
+    ]
+
+    chart_response = {
+        "model_type": "lstm",
+        "history": history,
+        "predictions": predictions,
+        "metrics": result["metrics"],
+    }
+
+    # Lưu response đầy đủ vào cache để cache hit cũng trả đúng cấu trúc
+    _cache[cache_key] = {"data": chart_response, "expire_at": datetime.utcnow() + CACHE_TTL}
 
     return {
         "product_url": product_url,
         "source": source,
         "cached": False,
-        **result,
+        **chart_response,
     }
 
 
@@ -520,8 +626,39 @@ def chat_endpoint(message: Dict[str, Any]):
         }
 
     logger.info(f"Chat request: '{user_message[:100]}'")
-    response = get_chat_response(user_message)
+    response = get_chat_response_rag(user_message)
     return response
+
+
+# ─── Sentiment Analysis Endpoint ───────────────────────────────────────
+
+@app.post("/api/sentiment/analyze")
+def sentiment_analyze(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """Phân tích cảm xúc bình luận sản phẩm bằng PhoBERT (3 nhãn) + RQS."""
+    try:
+        result = analyze_and_save_product_sentiment(product_url, source)
+        return result
+    except RuntimeError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Lỗi sentiment analysis: {e}", exc_info=True)
+        return {"error": f"Lỗi khi phân tích sentiment: {e}"}
+
+
+@app.get("/api/sentiment/result")
+def sentiment_result(
+    product_url: str = Query(..., description="Product URL"),
+    source: str = Query(..., description="Source name"),
+):
+    """Lấy kết quả sentiment đã phân tích từ DB."""
+    from utils.db import get_sentiment_result
+    result = get_sentiment_result(product_url, source)
+    if not result:
+        return {"error": "Chưa có kết quả sentiment cho sản phẩm này."}
+    return result
 
 
 # ─── Product Quality Score (PQS) & Recommendation Endpoints ────────────

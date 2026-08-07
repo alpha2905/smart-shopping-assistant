@@ -10,6 +10,8 @@ import asyncio
 import logging
 import random
 import re
+import sqlite3
+import threading
 import unicodedata
 from abc import ABC, abstractmethod
 from typing import List, Optional
@@ -20,6 +22,56 @@ from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from models.product import Product
 
 logger = logging.getLogger(__name__)
+
+# crawl4ai dùng chung 1 file SQLite (cache robots.txt). Khi nhiều scraper chạy
+# song song (ThreadPoolExecutor trong main.py), nhiều thread cùng khởi tạo
+# AsyncWebCrawler → cùng lúc mở 1 file SQLite → "sqlite3.OperationalError:
+# disk I/O error". Lock này tuần tự hóa việc khởi tạo AsyncWebCrawler.
+# Ngoài ra file crawl4ai.db có thể bị corrupt khi server bị kill giữa chừng
+# (ví dụ uvicorn --reload tắt đột ngột) → mọi lần khởi tạo sau đều fail. Ta
+# tự dò lỗi sqlite, xóa file hỏng và tạo lại để self-heal.
+_CRAWLER_INIT_LOCK = threading.Lock()
+_SQLITE_ERRORS = (
+    "disk I/O error",
+    "database disk image is malformed",
+    "database is locked",
+    "unable to open database file",
+    "file is not a database",
+)
+
+
+def _repair_crawl4ai_db():
+    """Xóa file crawl4ai.db hỏng để crawl4ai tạo lại lần chạy sau."""
+    import os
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, ".crawl4ai", "crawl4ai.db"),
+        os.path.join(home, ".crawl4ai", "cache", "crawl4ai.db"),
+    ]
+    removed = []
+    for db_path in candidates:
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+                removed.append(db_path)
+                logger.warning("Đã xóa crawl4ai.db hỏng: %s", db_path)
+            except Exception as e:
+                logger.warning("Không xóa được %s: %s", db_path, e)
+    return removed
+
+
+def _create_crawler(config: BrowserConfig) -> AsyncWebCrawler:
+    """Khởi tạo AsyncWebCrawler an toàn đa luồng + tự sửa file db hỏng."""
+    with _CRAWLER_INIT_LOCK:
+        try:
+            return AsyncWebCrawler(config=config)
+        except sqlite3.OperationalError as e:
+            msg = str(e)
+            if any(err in msg for err in _SQLITE_ERRORS):
+                logger.error("crawl4ai.db lỗi SQLite (%s) — thử tự sửa...", msg)
+                _repair_crawl4ai_db()
+                return AsyncWebCrawler(config=config)
+            raise
 
 DEFAULT_LOAD_MORE_JS = """
 (async()=>{const s=ms=>new Promise(r=>setTimeout(r,ms));
@@ -173,7 +225,11 @@ class BaseScraper(ABC):
             cache_mode=CacheMode.BYPASS,
             js_code=js_code or None,
             page_timeout=45000,
-            wait_until="load",
+            # "load" chờ mọi subresource (quảng cáo/tracker) → TGDD không bao giờ
+            # load xong trong 45s → Page.goto timeout → crawl4ai antibot tưởng bị
+            # chặn và retry thêm 2 lần nữa (mỗi lần 45s). "domcontentloaded" là
+            # mặc định an toàn của crawl4ai; magic=True đã chờ thêm ổn định content.
+            wait_until="domcontentloaded",
             max_retries=2,
             simulate_user=True,
             override_navigator=True,
@@ -196,14 +252,14 @@ class BaseScraper(ABC):
     def fetch_html(self, url: str, wait_for: str = "") -> Optional[str]:
         """Cào 1 URL, trả về HTML string (sync wrapper)."""
         async def _run():
-            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+            async with _create_crawler(self._browser_cfg) as c:
                 return await self._fetch_async(url, c, wait_for)
         return asyncio.run(_run())
 
     def fetch_many(self, urls: List[str], wait_for: str = "") -> List[Optional[str]]:
         """Cào nhiều URL song song trong cùng 1 crawler (async)."""
         async def _run():
-            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+            async with _create_crawler(self._browser_cfg) as c:
                 return await asyncio.gather(
                     *(self._fetch_async(u, c, wait_for) for u in urls)
                 )
@@ -401,7 +457,7 @@ class BaseScraper(ABC):
         seen = set()
 
         async def _crawl():
-            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+            async with _create_crawler(self._browser_cfg) as c:
                 for path in self.category_paths:
                     url = self.base_url + path
                     logger.info(f"[{self.site_name}] Crawl danh mục {url}")
@@ -427,7 +483,7 @@ class BaseScraper(ABC):
         urls = [p.product_url for p in products]
 
         async def _run():
-            async with AsyncWebCrawler(config=self._browser_cfg) as c:
+            async with _create_crawler(self._browser_cfg) as c:
                 htmls = await asyncio.gather(*(self._fetch_async(u, c) for u in urls))
                 return htmls
 

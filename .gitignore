@@ -6,9 +6,19 @@ __pycache__/
 # Keras/TensorFlow model files
 *.keras
 *.h5
+saved_models/
+
+# Các thư mục model/venv khác
+.venv*/
+venv/
+.venv/
+.vite/
 
 # Log files
 logs/
+*.log
+*_log*.txt
+server_log*.txt
 
 # Environment & secrets
 .env
@@ -23,6 +33,7 @@ venv/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+package-lock.json
 
 # IDE
 .idea/

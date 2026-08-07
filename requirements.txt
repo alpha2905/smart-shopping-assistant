@@ -1,17 +1,20 @@
-playwright>=1.40.0
-pydantic>=2.0.0
-rich>=13.0.0
-aiofiles>=23.0.0
-fastapi>=0.104.0
-uvicorn>=0.24.0
-python-dotenv>=1.0.0
-pymongo>=4.5.0
-apscheduler>=3.10.0
-tensorflow>=2.10.0
-scikit-learn>=1.3.0
-numpy>=1.26.0
-beautifulsoup4>=4.12.0
-transformers>=4.30.0
-torch>=2.0.0
-pytest>=8.0.0
-mongomock>=4.1.0
+# Core application
+fastapi
+uvicorn[standard]
+pymongo
+apscheduler
+
+# Data processing & ML
+numpy
+scikit-learn
+torch
+sentence-transformers
+
+# Optional, but used in scripts
+tensorflow
+python-docx
+
+# Web Scraping
+crawl4ai
+beautifulsoup4
+lxml

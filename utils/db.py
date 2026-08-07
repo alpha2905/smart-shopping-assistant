@@ -457,10 +457,15 @@ def get_all_products() -> List[Dict[str, Any]]:
 
 
 def get_latest_prices_for_query(query: str) -> List[Dict[str, Any]]:
-    """Return products whose last-scraped query matches (latest price + comments)."""
+    """Return products whose last-scraped query matches (latest price + comments).
+
+    Dùng regex case-insensitive để không phân biệt hoa/thường,
+    tránh cache/DB miss khi người dùng gõ "iPhone 17" còn dữ liệu lưu "iphone 17".
+    """
     col = get_collection()
     results = []
-    for doc in col.find({"query": query}):
+    query_regex = re.compile(f"^{re.escape(query.strip())}$", re.IGNORECASE)
+    for doc in col.find({"query": query_regex}):
         price_history = doc.get("price_history", [])
         latest_price = price_history[-1] if price_history else {}
         results.append({
@@ -492,8 +497,11 @@ def get_products_with_price_history(min_history: int = 3) -> List[Dict[str, Any]
     for name in collection_names:
         try:
             col = db[name]
-            # Efficiently find documents with enough history using $size
-            for doc in col.find({"price_history": {"$exists": True, "$size": {"$gte": min_history}}}):
+            # Efficiently find documents with enough history using $expr + $size
+            for doc in col.find({
+                "price_history": {"$exists": True},
+                "$expr": {"$gte": [{"$size": "$price_history"}, min_history]}
+            }):
                 price_history = doc.get("price_history", [])
                 results.append({
                     "product_url": doc.get("product_url", ""),
