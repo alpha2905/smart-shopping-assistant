@@ -39,6 +39,7 @@ from utils.recommendation_engine import (
 )
 from utils.search_filter import filter_comparable_phones, expand_query
 from train_lstm_gpu import get_or_train_model, create_sequences, DEVICE
+from ai.evaluate import calculate_direction_accuracy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -607,8 +608,13 @@ def _train_and_predict(
         rmse = float(np.sqrt(np.mean((y_true_raw - y_pred_train_raw) ** 2)))
         mask = y_true_raw != 0
         mape = float(np.mean(np.abs((y_true_raw[mask] - y_pred_train_raw[mask]) / y_true_raw[mask])) * 100) if np.any(mask) else 0.0
+        direction_accuracy = calculate_direction_accuracy(
+            y_true_raw.flatten().tolist(),
+            y_pred_train_raw.flatten().tolist(),
+        )
     else:
         mae = rmse = mape = 0.0
+        direction_accuracy = 0.0
 
     today = datetime.utcnow().date()
     forecasts = [
@@ -622,6 +628,7 @@ def _train_and_predict(
             "mae": round(mae, 2),
             "rmse": round(rmse, 2),
             "mape": round(mape, 2),
+            "direction_accuracy": direction_accuracy,
             "trained_epochs": trained_epochs,
             "prediction_updated_at": datetime.utcnow(),
         },

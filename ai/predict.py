@@ -7,6 +7,8 @@ import logging
 import numpy as np
 from typing import List, Optional, Tuple, Any, Dict
 
+from ai.evaluate import calculate_direction_accuracy
+
 logger = logging.getLogger(__name__)
 
 # Đường dẫn model mặc định (nếu dùng model tổng)
@@ -127,6 +129,10 @@ def train_and_forecast(
     rmse = float(np.sqrt(np.mean((y_true_raw - y_pred_raw) ** 2)))
     mask = y_true_raw != 0
     mape = float(np.mean(np.abs((y_true_raw[mask] - y_pred_raw[mask]) / y_true_raw[mask])) * 100) if np.any(mask) else 0.0
+    direction_accuracy = calculate_direction_accuracy(
+        y_true_raw.flatten().tolist(),
+        y_pred_raw.flatten().tolist(),
+    )
 
     return {
         "forecasts": forecasts,
@@ -134,5 +140,6 @@ def train_and_forecast(
             "mae": round(mae, 2),
             "rmse": round(rmse, 2),
             "mape": round(mape, 2),
+            "direction_accuracy": direction_accuracy,
         },
     }

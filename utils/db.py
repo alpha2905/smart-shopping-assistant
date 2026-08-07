@@ -317,6 +317,7 @@ def save_forecasts(
             "mae": metrics.get("mae"),
             "rmse": metrics.get("rmse"),
             "mape": metrics.get("mape"),
+            "direction_accuracy": metrics.get("direction_accuracy"),
             "prediction_updated_at": prediction_updated_at,
             "verified": False, # Mark as not yet verified against actual price
         })
