@@ -373,7 +373,7 @@ def _resolve_scrape_query(q: str) -> str:
 @app.get("/api/search")
 def search_products(
     q: str = Query(..., description="Từ khóa tìm kiếm sản phẩm"),
-    force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
+    force_refresh: bool = Query(False, description="Bỏ qua in-memory cache, đọc lại từ DB"),
 ):
     now = datetime.utcnow()
     cache_key = _norm_query_key(q)
@@ -389,143 +389,55 @@ def search_products(
                 "cached": True,
             }
 
-        cached_in_db = get_latest_prices_for_query(cache_key)
-        if cached_in_db:
-            logger.info("Query '%s' found in DB, returning %d cached products instantly", q, len(cached_in_db))
-            _cache[cache_key] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
-            return {
-                "query": q,
-                "total": len(cached_in_db),
-                "products": cached_in_db,
-                "cached": True,
-            }
-
-    logger.info("Query '%s' not in cache (or force_refresh), scraping from stores...", q)
-    all_products = scrape_and_save(_resolve_scrape_query(q))
-
-    _cache[cache_key] = {"data": all_products, "expire_at": now + CACHE_TTL}
-
+    # Chỉ đọc từ DB — KHÔNG trigger crawl khi user search.
+    # Dữ liệu được thu thập riêng qua /api/crawl/* hoặc scheduler chạy ngầm.
+    cached_in_db = get_latest_prices_for_query(cache_key)
+    filtered_db = filter_comparable_phones(cached_in_db, q)
+    _cache[cache_key] = {"data": filtered_db, "expire_at": now + CACHE_TTL}
     return {
         "query": q,
-        "total": len(all_products),
-        "products": all_products,
-        "cached": False,
+        "total": len(filtered_db),
+        "products": filtered_db,
+        "cached": True,
     }
 
 
 # ─── SSE Streaming Search Endpoint ─────────────────────────────────────
 
-async def _run_scraper_async(scraper_class, query: str, max_products: int) -> Tuple[str, List[Dict[str, Any]]]:
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None, run_single_scraper, scraper_class, query, max_products
-    )
-    source = getattr(scraper_class, "site_name", scraper_class.__name__)
-    return source, result
-
-
 @app.get("/api/search/stream")
 async def search_products_stream(
     q: str = Query(..., description="Từ khóa tìm kiếm sản phẩm"),
-    force_refresh: bool = Query(False, description="Bỏ qua cache, scrape lại từ đầu"),
+    force_refresh: bool = Query(False, description="Bỏ qua in-memory cache, đọc lại từ DB"),
 ):
+    """
+    Search CHỈ đọc từ DB — không trigger crawl.
+    Dữ liệu được thu thập riêng qua /api/crawl/* hoặc scheduler chạy ngầm,
+    tránh timeout khi sàn chặn (vd: TGDD) trong lúc user chờ kết quả.
+    """
     now = datetime.utcnow()
     cache_key = _norm_query_key(q)
 
-    # Mở rộng query viết tắt (vd: "ip 17" → "iphone 17") để các sàn hiểu.
-    # Nếu có thể mở rộng, bỏ qua cache rỗng đã lưu từ lần gõ viết tắt trước đó.
-    queries_to_try = expand_query(q)
-    scrape_query = queries_to_try[1] if len(queries_to_try) > 1 else q
-    can_expand = scrape_query != q
-    logger.info("Stream search: query='%s', scrape_query='%s'", q, scrape_query)
-
     if not force_refresh:
         cached_in_memory = _cache.get(cache_key)
-        if (
-            cached_in_memory
-            and now < cached_in_memory["expire_at"]
-            and (cached_in_memory["data"] or not can_expand)
-        ):
+        if cached_in_memory and now < cached_in_memory["expire_at"]:
             logger.info("Query '%s' found in in-memory cache, streaming %d products", q, len(cached_in_memory["data"]))
-            # Lọc top 3 giá rẻ nhất khớp query
             filtered_memory = filter_comparable_phones(cached_in_memory["data"], q)
-            logger.info("In-memory cache: %d raw → %d top-3 products", len(cached_in_memory["data"]), len(filtered_memory))
             async def cached_stream_in_memory():
                 yield f"event: cached\ndata: {json.dumps({'total': len(filtered_memory), 'products': filtered_memory}, ensure_ascii=False, default=str)}\n\n"
                 yield f"event: done\ndata: {json.dumps({'total': len(filtered_memory), 'query': q, 'cached': True, 'products': filtered_memory}, ensure_ascii=False, default=str)}\n\n"
             return StreamingResponse(cached_stream_in_memory(), media_type="text/event-stream")
 
-        cached_in_db = get_latest_prices_for_query(cache_key)
-        if cached_in_db or not can_expand:
-            if cached_in_db:
-                logger.info("Query '%s' found in DB, streaming %d cached products", q, len(cached_in_db))
-                _cache[cache_key] = {"data": cached_in_db, "expire_at": now + CACHE_TTL}
-                # Lọc top 3 giá rẻ nhất khớp query
-                filtered_db = filter_comparable_phones(cached_in_db, q)
-                logger.info("DB cache: %d raw → %d top-3 products", len(cached_in_db), len(filtered_db))
-                async def cached_stream_db():
-                    yield f"event: cached\ndata: {json.dumps({'total': len(filtered_db), 'products': filtered_db}, ensure_ascii=False, default=str)}\n\n"
-                    yield f"event: done\ndata: {json.dumps({'total': len(filtered_db), 'query': q, 'cached': True, 'products': filtered_db}, ensure_ascii=False, default=str)}\n\n"
-                return StreamingResponse(cached_stream_db(), media_type="text/event-stream")
+    # Đọc từ DB → lọc top 3 giá rẻ nhất khớp query
+    cached_in_db = get_latest_prices_for_query(cache_key)
+    filtered_db = filter_comparable_phones(cached_in_db, q)
+    logger.info("Stream search: query='%s' → %d sản phẩm từ DB", q, len(filtered_db))
+    _cache[cache_key] = {"data": filtered_db, "expire_at": now + CACHE_TTL}
 
-    max_products = 15
-    scraper_classes = _get_scraper_classes()
+    async def cached_stream_db():
+        yield f"event: cached\ndata: {json.dumps({'total': len(filtered_db), 'products': filtered_db}, ensure_ascii=False, default=str)}\n\n"
+        yield f"event: done\ndata: {json.dumps({'total': len(filtered_db), 'query': q, 'cached': True, 'products': filtered_db}, ensure_ascii=False, default=str)}\n\n"
 
-    async def event_stream():
-        all_products = []
-
-        tasks = [
-            asyncio.ensure_future(_run_scraper_async(sc, scrape_query, max_products))
-            for sc in scraper_classes
-        ]
-
-        try:
-            for coro in asyncio.as_completed(tasks):
-                try:
-                    source, result = await coro
-                    if result:
-                        all_products.extend(result)
-                        event_data = {
-                            "source": source,
-                            "products": result,
-                            "count": len(result),
-                        }
-                        yield f"event: store\ndata: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
-                    else:
-                        event_data = {
-                            "source": source,
-                            "products": [],
-                            "count": 0,
-                        }
-                        yield f"event: store\ndata: {json.dumps(event_data, ensure_ascii=False, default=str)}\n\n"
-                except Exception as e:
-                    logger.error(f"Lỗi scraper trong SSE stream: {e}", exc_info=True)
-                    yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
-
-            filtered_products = filter_comparable_phones(all_products, q)
-            logger.info(
-                f"SSE stream: {len(all_products)} sản phẩm thô → {len(filtered_products)} điện thoại khớp. "
-                f"Lưu hết {len(all_products)} sản phẩm vào DB"
-            )
-
-            if all_products:
-                save_search_results(cache_key, all_products)
-
-            _cache[cache_key] = {"data": all_products, "expire_at": datetime.utcnow() + CACHE_TTL}
-
-            done_data = {
-                "total": len(filtered_products),
-                "query": q,
-                "cached": False,
-                "products": filtered_products,
-            }
-            yield f"event: done\ndata: {json.dumps(done_data, ensure_ascii=False, default=str)}\n\n"
-
-        except Exception as e:
-            logger.error(f"Lỗi nghiêm trọng trong SSE stream: {e}", exc_info=True)
-            yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(cached_stream_db(), media_type="text/event-stream")
 
 
 # ─── Price History + LSTM Prediction Endpoints ─────────────────────────

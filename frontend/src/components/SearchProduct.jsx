@@ -126,12 +126,6 @@ export default function SearchProduct() {
     };
   };
 
-  const handleForceRefresh = (e) => {
-    if (e) e.preventDefault();
-    if (!keyword.trim()) return;
-    searchWithSSE(keyword, true);
-  };
-
   const handleSearch = (e) => {
     e.preventDefault();
     if (!keyword.trim()) return;
@@ -275,25 +269,17 @@ export default function SearchProduct() {
       {loading && (
         <div className="loading-container">
           <div className="loading-spinner"></div>
-          <span>Đang quét {7} cửa hàng để tìm top 3 giá tốt nhất...</span>
+          <span>Đang tra cứu dữ liệu trong hệ thống...</span>
         </div>
       )}
 
-      {/* Badge cache + nút scrape lại */}
+      {/* Badge dữ liệu từ DB */}
       {!loading && products.length > 0 && (
         <div className="cache-bar">
-          {cached ? (
-            <span className="cache-badge cached">⚡ Dữ liệu từ DB (trả về ngay)</span>
-          ) : (
-            <span className="cache-badge fresh">🔄 Vừa scrape mới</span>
-          )}
-          <button
-            className="refresh-btn"
-            onClick={() => handleForceRefresh()}
-            title="Scrape lại từ 7 sàn (bỏ qua cache)"
-          >
-            🔄 Scrape lại
-          </button>
+          <span className="cache-badge cached">⚡ Dữ liệu từ DB (không crawl khi tìm kiếm)</span>
+          <span className="cache-hint" style={{ fontSize: '0.78rem', color: 'var(--muted)' }}>
+            Dữ liệu được cập nhật định kỳ bởi hệ thống
+          </span>
         </div>
       )}
 
