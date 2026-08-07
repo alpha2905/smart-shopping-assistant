@@ -3,6 +3,9 @@ fastapi
 uvicorn[standard]
 pymongo
 apscheduler
+PyJWT
+passlib[bcrypt]
+email-validator
 
 # Data processing & ML
 numpy

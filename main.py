@@ -3,7 +3,7 @@ import sys
 import json
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Tuple
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,7 +26,11 @@ from utils.db import (
     init_clickbuy_collection, save_clickbuy_products, get_all_clickbuy_products,
     init_didongviet_collection, save_didongviet_products, get_all_didongviet_products,
     init_cellphones_collection, save_cellphones_products, get_all_cellphones_products,
-    parse_price, init_forecast_collection, save_forecasts, get_forecasts, init_sentiment_collection, get_sentiment_result)
+    parse_price, init_forecast_collection, save_forecasts, get_forecasts, init_sentiment_collection, get_sentiment_result,
+    init_auth_collections, get_user_by_email, get_user_by_username, create_user,
+    add_favorite, remove_favorite, get_favorites, is_favorite)
+from utils.auth import hash_password, verify_password, create_access_token, get_current_user
+from pydantic import BaseModel, EmailStr
 from ai.rag.pipeline import get_chat_response_rag
 from ai.sentiment.service import analyze_and_save_product_sentiment
 from utils.recommendation_engine import (
@@ -44,6 +48,7 @@ async def lifespan(app: FastAPI):
     """Quản lý vòng đời app: khởi tạo DB + scheduler khi start, dọn dẹp khi tắt."""
     init_sentiment_collection()
     init_forecast_collection()
+    init_auth_collections()
     init_db()
 
     scheduler.add_job(
@@ -67,6 +72,138 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Multi-Platform Product Search API", version="1.2", lifespan=lifespan)
+
+
+# ─── JWT Auth Endpoints ────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class FavoriteRequest(BaseModel):
+    product_url: str
+    source: str
+    name: str = ""
+    image_url: str = ""
+    price: str = ""
+
+
+@app.post("/api/auth/register")
+def register(req: RegisterRequest):
+    """Đăng ký tài khoản mới. Trả về thông tin user + JWT token."""
+    username = req.username.strip().lower()
+    email = req.email.strip().lower()
+
+    if len(username) < 3:
+        raise HTTPException(status_code=400, detail="Tên đăng nhập phải có ít nhất 3 ký tự")
+    if len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Mật khẩu phải có ít nhất 6 ký tự")
+
+    if get_user_by_email(email):
+        raise HTTPException(status_code=409, detail="Email đã được sử dụng")
+    if get_user_by_username(username):
+        raise HTTPException(status_code=409, detail="Tên đăng nhập đã tồn tại")
+
+    user = create_user(username, email, hash_password(req.password))
+    token = create_access_token(str(user["_id"]))
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "_id": str(user["_id"]),
+            "username": user["username"],
+            "email": user["email"],
+            "created_at": user["created_at"],
+        },
+    }
+
+
+@app.post("/api/auth/login")
+def login(req: LoginRequest):
+    """Đăng nhập bằng email + mật khẩu. Trả về JWT token."""
+    email = req.email.strip().lower()
+    user = get_user_by_email(email)
+    if not user or not verify_password(req.password, user.get("password_hash", "")):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email hoặc mật khẩu không đúng",
+        )
+    token = create_access_token(str(user["_id"]))
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "_id": str(user["_id"]),
+            "username": user["username"],
+            "email": user["email"],
+            "created_at": user["created_at"],
+        },
+    }
+
+
+@app.get("/api/auth/me")
+def me(user: dict = Depends(get_current_user)):
+    """Lấy thông tin user hiện tại từ JWT token."""
+    return user
+
+
+# ─── Favorites Endpoints ───────────────────────────────────────────────
+
+@app.get("/api/favorites")
+def list_favorites(user: dict = Depends(get_current_user)):
+    """Danh sách sản phẩm yêu thích của user hiện tại."""
+    favorites = get_favorites(user["_id"])
+    return {"total": len(favorites), "favorites": favorites}
+
+
+@app.post("/api/favorites")
+def add_favorite_endpoint(req: FavoriteRequest, user: dict = Depends(get_current_user)):
+    """Thêm một sản phẩm vào danh sách yêu thích."""
+    added = add_favorite(
+        user["_id"],
+        req.product_url,
+        req.source,
+        {
+            "name": req.name,
+            "image_url": req.image_url,
+            "price": req.price,
+        },
+    )
+    return {
+        "message": "Đã thêm vào yêu thích" if added else "Sản phẩm đã có trong danh sách yêu thích",
+        "added": added,
+        "favorite": True,
+    }
+
+
+@app.delete("/api/favorites")
+def remove_favorite_endpoint(
+    product_url: str = Query(...),
+    source: str = Query(...),
+    user: dict = Depends(get_current_user),
+):
+    """Xóa một sản phẩm khỏi danh sách yêu thích."""
+    removed = remove_favorite(user["_id"], product_url, source)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Không tìm thấy sản phẩm trong danh sách yêu thích")
+    return {"message": "Đã xóa khỏi yêu thích", "favorite": False}
+
+
+@app.get("/api/favorites/check")
+def check_favorite(
+    product_url: str = Query(...),
+    source: str = Query(...),
+    user: dict = Depends(get_current_user),
+):
+    """Kiểm tra một sản phẩm có nằm trong danh sách yêu thích không."""
+    return {"favorite": is_favorite(user["_id"], product_url, source)}
 
 
 @app.get("/")

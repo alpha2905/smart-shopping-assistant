@@ -1222,3 +1222,116 @@ def get_all_viettelstore_products() -> List[Dict[str, Any]]:
         })
     results.sort(key=lambda x: x.get("name", ""))
     return results
+
+
+# ─── Users & Favorites ─────────────────────────────────────────────────
+
+def get_users_collection():
+    """Return the 'users' collection."""
+    return get_db()["users"]
+
+
+def get_favorites_collection():
+    """Return the 'favorites' collection."""
+    return get_db()["favorites"]
+
+
+def init_auth_collections() -> None:
+    """Create indexes for 'users' and 'favorites' collections."""
+    users = get_users_collection()
+    users.create_index([("email", ASCENDING)], unique=True)
+    users.create_index([("username", ASCENDING)], unique=True)
+
+    favs = get_favorites_collection()
+    favs.create_index(
+        [("user_id", ASCENDING), ("product_url", ASCENDING), ("source", ASCENDING)],
+        unique=True,
+    )
+    favs.create_index([("created_at", DESCENDING)])
+    logger.info("MongoDB 'users' and 'favorites' collection indexes initialized")
+
+
+def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
+    """Find a user by email (case-insensitive)."""
+    return get_users_collection().find_one({"email": email.strip().lower()})
+
+
+def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Find a user by username (case-sensitive, field stored lowercase)."""
+    return get_users_collection().find_one({"username": username.strip().lower()})
+
+
+def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
+    """Find a user by its ObjectId string."""
+    try:
+        return get_users_collection().find_one({"_id": ObjectId(user_id)})
+    except Exception:
+        return None
+
+
+def create_user(username: str, email: str, password_hash: str) -> Dict[str, Any]:
+    """Insert a new user; raises pymongo DuplicateKeyError if already exists."""
+    now = datetime.utcnow()
+    user = {
+        "username": username.strip().lower(),
+        "email": email.strip().lower(),
+        "password_hash": password_hash,
+        "created_at": now,
+    }
+    result = get_users_collection().insert_one(user)
+    user["_id"] = result.inserted_id
+    return user
+
+
+def add_favorite(
+    user_id: str,
+    product_url: str,
+    source: str,
+    product_data: Dict[str, Any],
+) -> bool:
+    """
+    Add a favorite product for a user. Returns True if newly added,
+    False if it already existed.
+    """
+    col = get_favorites_collection()
+    doc = {
+        "user_id": user_id,
+        "product_url": product_url,
+        "source": source,
+        "name": product_data.get("name", ""),
+        "image_url": product_data.get("image_url", ""),
+        "price": product_data.get("price", ""),
+        "created_at": datetime.utcnow(),
+    }
+    try:
+        col.insert_one(doc)
+        return True
+    except Exception:
+        # Duplicate → already favorite
+        return False
+
+
+def remove_favorite(user_id: str, product_url: str, source: str) -> bool:
+    """Remove a favorite product. Returns True if something was removed."""
+    result = get_favorites_collection().delete_one(
+        {"user_id": user_id, "product_url": product_url, "source": source}
+    )
+    return result.deleted_count > 0
+
+
+def get_favorites(user_id: str) -> List[Dict[str, Any]]:
+    """Return all favorite products for a user, most recently added first."""
+    cursor = get_favorites_collection().find(
+        {"user_id": user_id}, {"_id": 0, "user_id": 0}
+    ).sort("created_at", DESCENDING)
+    return list(cursor)
+
+
+def is_favorite(user_id: str, product_url: str, source: str) -> bool:
+    """Check whether a product is already in the user's favorites."""
+    return (
+        get_favorites_collection().count_documents(
+            {"user_id": user_id, "product_url": product_url, "source": source}
+        )
+        > 0
+    )
