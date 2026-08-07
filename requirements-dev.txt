@@ -1,0 +1,4 @@
+# Test dependencies (dev only)
+pytest
+pytest-asyncio
+python-dotenv
